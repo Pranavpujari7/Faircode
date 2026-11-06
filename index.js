@@ -9,6 +9,7 @@ const DEBUG = true;
 const LOCAL_LINK = true;
 const LOCAL_URL = "http://127.0.0.1:8787";
 const LOCAL_KEY = "qd";
+const AUTO_SEND = true;
 const FILL_DEBUG = true;
 const FILL_BOX = true;
 const PREFETCH = true;
@@ -38,6 +39,7 @@ const ReactionActions = findByProps("addReaction", "removeReaction");
 const PermissionStore = findByStoreName("PermissionStore");
 const SelectedChannelStore = findByStoreName("SelectedChannelStore");
 const UserStore = findByStoreName("UserStore");
+const MessageActions = findByProps("sendMessage", "receiveMessage");
 const DraftStore = findByStoreName("DraftStore");
 const DraftActions = findByProps("changeDraft");
 const Flux = (vendetta.metro.common && vendetta.metro.common.FluxDispatcher) || findByProps("dispatch", "subscribe");
@@ -209,20 +211,40 @@ return used;
 }
 function probeInput() {
 const names = ["insertText", "setText", "setChatInputText", "updateText", "appendText", "setInputText"];
-  const hit = [];
+const hit = [];
 names.forEach(function (n) { try { if (findByProps(n)) hit.push(n); } catch (e) {} });
 return hit.length ? hit.join(",") : "none";
 }
+const InputCmds = findByProps("setText", "getText");
+const setTextArity = InputCmds && InputCmds.setText ? InputCmds.setText.length : 0;
+let inputRef = null, refVia = "", seenSig = "", inCall = false;
+if (InputCmds) {
+["focus", "blur", "getText", "flushText", "setText", "setSelectedRange", "backspace"].forEach(function (name) {
+if (typeof InputCmds[name] !== "function") return;
+try {
+unpatches.push(before(name, InputCmds, function (args) {
+if (inCall) return;
+const a = args && args[0];
+if (a && (typeof a === "object" || typeof a === "number")) { inputRef = a; refVia = name; }
+if (name === "setText" && !seenSig) seenSig = Array.prototype.map.call(args, function (x) { return typeof x; }).join(",");
+}));
+} catch (e) {}
+});
+}
 function pushToInput(text) {
 try {
-const mod = findByProps("setText");
-if (!mod || typeof mod.setText !== "function") return "no setText helper";
-const keys = Object.keys(mod).slice(0, 10).join(",");
-const arity = mod.setText.length;
-if (arity > 1) return "setText takes " + arity + " arguments, not called; module has: " + keys;
-mod.setText(text);
-return "called setText(text) (arity " + arity + "); module has: " + keys;
-} catch (e) { return "setText failed: " + (e && e.message); }
+if (!InputCmds || typeof InputCmds.setText !== "function") return "no setText helper";
+const sig = seenSig ? " Discord's own setText calls look like (" + seenSig + ")." : "";
+const arity = setTextArity;
+  if (arity <= 1) { inCall = true; try { InputCmds.setText(text); } finally { inCall = false; } return "called setText(text)." + sig; }
+if (!inputRef) return "no handle to the box yet - tap the message box once, then double-tap the puzzle again." + sig;
+inCall = true;
+try {
+InputCmds.setText(inputRef, text);
+if (typeof InputCmds.flushText === "function") InputCmds.flushText(inputRef);
+} finally { inCall = false; }
+return "called setText(handle, text)+flushText; handle is a " + typeof inputRef + " taken from " + refVia + "." + sig;
+} catch (e) { inCall = false; return "setText failed: " + (e && e.message); }
 }
 function fillReport(msg) {
 say("box fill: " + msg);
@@ -251,12 +273,36 @@ fillReport("set the draft via " + used.join("+") + " to \"" + text + "\". Store 
 (after === text ? " (store took it)" : " (store did NOT take it)") + ". Input: " + inputNote);
 } catch (e) { fillReport("failed: " + (e && e.message)); }
 }
+const sentFor = {};
+function sendAnswer(message, answer) {
+try {
+const text = String(answer || "").replace(/\s+/g, " ").trim();
+if (!text || text.length > 80) { say("not sent: empty or too long answer"); return false; }
+if (sentFor[message.id]) { say("not sent: already answered this puzzle"); return false; }
+const ch = message.channel_id;
+if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { say("not sent: not looking at the puzzle channel"); return false; }
+let how = "";
+try {
+if (MessageActions && MessageActions.sendMessage) {
+MessageActions.sendMessage(ch, { content: text, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, undefined, {});
+how = "sendMessage";
+}
+} catch (e) { how = ""; say("sendMessage failed: " + (e && e.message)); }
+if (!how) {
+RestAPI.post({ url: "/channels/" + ch + "/messages", body: { content: text, nonce: nonce(), tts: false } });
+how = "REST";
+}
+sentFor[message.id] = 1;
+say("answer sent via " + how + ": " + text);
+return true;
+} catch (e) { say("send failed: " + (e && e.message)); return false; }
+}
 async function decodeNow(message) {
 if (LOCAL_LINK && Date.now() >= localDownUntil) {
 const t0 = Date.now();
 try {
 const r = await localCall("/decode", payload(message), 1500);
-if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); fillBox(message, r.answer); return; }
+if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); if (AUTO_SEND) sendAnswer(message, r.answer); else fillBox(message, r.answer); return; }
 say("local decode gave no answer (" + (r && r.answer) + ") -> using Discord");
 if (FILL_BOX) fillReport("not filled: the bot gave no answer over the local link (" + (r && r.answer) + "), so Discord was used instead");
 } catch (e) {
@@ -381,14 +427,12 @@ if (HIDE_SHEET) setTimeout(function () { try { ActionSheet.hideActionSheet(); } 
 }));
 }
 function buildStatus() {
-return "Quick Decode v14 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
+return "Quick Decode v16 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
 (cmdCache ? ", command cached" : ", command not cached yet") + (LOCAL_LINK ? ", local link: " + localState : "") +
-(FILL_BOX ? ", box fill: draftStore " + (DraftStore && DraftStore.getDraft ? "ok" : "MISSING") + ", changeDraft " + (DraftActions && DraftActions.changeDraft ? "ok" : "MISSING") + ", flux " + (Flux && Flux.dispatch ? "ok" : "MISSING") : "") + ")";
+(AUTO_SEND ? ", auto-send: ON (" + (MessageActions && MessageActions.sendMessage ? "sendMessage ok" : "sendMessage MISSING, REST fallback") + ")" : "") + (FILL_BOX ? ", box fill: draftStore " + (DraftStore && DraftStore.getDraft ? "ok" : "MISSING") + ", changeDraft " + (DraftActions && DraftActions.changeDraft ? "ok" : "MISSING") + ", flux " + (Flux && Flux.dispatch ? "ok" : "MISSING") : "") + ")";
 }
 say(buildStatus());
 if (DEBUG) setTimeout(function () { alertMsg(buildStatus()); }, 6500);
 exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
 return exports;
 })({});
-
-  
