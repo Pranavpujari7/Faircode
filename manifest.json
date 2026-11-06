@@ -1,8 +1,8 @@
 {
-  "name": "fair Decode",
+  "name": "Quick Decode",
   "description": "Double-tap (or hold) a heist puzzle message and your Decode app runs instantly (no Apps menu).",
   "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
-  "hash": "qd16",
+  "hash": "qd17",
   "vendetta": { "icon": "ic_message_edit" }
 }
