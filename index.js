@@ -181,7 +181,7 @@ try {
 p = body ? fetch(LOCAL_URL + path, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(body) })
 : fetch(LOCAL_URL + path);
 } catch (e) { clearTimeout(t); reject(e); return; }
-  p.then(function (r) { return r.json(); }).then(function (j) { clearTimeout(t); resolve(j); },
+p.then(function (r) { return r.json(); }).then(function (j) { clearTimeout(t); resolve(j); },
 function (e) { clearTimeout(t); reject(e); });
 });
 }
