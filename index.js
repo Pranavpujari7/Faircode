@@ -10,6 +10,8 @@ const LOCAL_LINK = true;
 const LOCAL_URL = "http://127.0.0.1:8787";
 const LOCAL_KEY = "qd";
 const AUTO_SEND = true;
+const FILL_DEBUG = true;
+const FILL_BOX = true;
 const PREFETCH = true;
 const CMD_ID = "";
 const CMD_VERSION = "";
@@ -38,6 +40,8 @@ const PermissionStore = findByStoreName("PermissionStore");
 const SelectedChannelStore = findByStoreName("SelectedChannelStore");
 const UserStore = findByStoreName("UserStore");
 const MessageActions = findByProps("sendMessage", "receiveMessage");
+const DraftStore = findByStoreName("DraftStore");
+const DraftActions = findByProps("changeDraft");
 const Flux = (vendetta.metro.common && vendetta.metro.common.FluxDispatcher) || findByProps("dispatch", "subscribe");
 const PermConsts = (vendetta.metro.common.constants && vendetta.metro.common.constants.Permissions) ||
 (findByProps("Permissions") || {}).Permissions || {};
@@ -186,6 +190,90 @@ function (e) { clearTimeout(t); reject(e); });
 });
 }
 function linkDown(e) { if (!e || e.message !== "timeout") localDownUntil = Date.now() + 20000; }
+let rawDraftNote = "";
+let lastFill = null;
+function currentDraft(channelId) {
+try {
+if (DraftStore && DraftStore.getDraft) {
+let v = DraftStore.getDraft(channelId, 0);
+rawDraftNote = typeof v + (v && typeof v === "object" ? " " + JSON.stringify(v).slice(0, 80) : ":" + JSON.stringify(v));
+if (v && typeof v === "object") v = v.draft !== undefined ? v.draft : (v.text !== undefined ? v.text : (v.content !== undefined ? v.content : ""));
+return String(v || "");
+}
+} catch (e) { rawDraftNote = "error " + (e && e.message); }
+return null;
+}
+function setBox(channelId, text) {
+const used = [];
+try { if (DraftActions && DraftActions.changeDraft) { DraftActions.changeDraft(channelId, text, 0); used.push("changeDraft"); } } catch (e) { say("changeDraft failed: " + (e && e.message)); }
+try { if (Flux && Flux.dispatch) { Flux.dispatch({ type: "DRAFT_CHANGE", channelId: channelId, draft: text, draftType: 0 }); used.push("flux"); } } catch (e) { say("flux draft failed: " + (e && e.message)); }
+return used;
+}
+function probeInput() {
+const names = ["insertText", "setText", "setChatInputText", "updateText", "appendText", "setInputText"];
+const hit = [];
+names.forEach(function (n) { try { if (findByProps(n)) hit.push(n); } catch (e) {} });
+return hit.length ? hit.join(",") : "none";
+}
+const InputCmds = findByProps("setText", "getText");
+const setTextArity = InputCmds && InputCmds.setText ? InputCmds.setText.length : 0;
+let inputRef = null, refVia = "", seenSig = "", inCall = false;
+if (InputCmds) {
+["focus", "blur", "getText", "flushText", "setText", "setSelectedRange", "backspace"].forEach(function (name) {
+if (typeof InputCmds[name] !== "function") return;
+try {
+unpatches.push(before(name, InputCmds, function (args) {
+if (inCall) return;
+const a = args && args[0];
+if (a && (typeof a === "object" || typeof a === "number")) { inputRef = a; refVia = name; }
+if (name === "setText" && !seenSig) seenSig = Array.prototype.map.call(args, function (x) { return typeof x; }).join(",");
+}));
+} catch (e) {}
+});
+}
+// ===== PART 2 =====
+function pushToInput(text) {
+try {
+if (!InputCmds || typeof InputCmds.setText !== "function") return "no setText helper";
+const sig = seenSig ? " Discord's own setText calls look like (" + seenSig + ")." : "";
+const arity = setTextArity;
+  if (arity <= 1) { inCall = true; try { InputCmds.setText(text); } finally { inCall = false; } return "called setText(text)." + sig; }
+if (!inputRef) return "no handle to the box yet - tap the message box once, then double-tap the puzzle again." + sig;
+inCall = true;
+try {
+InputCmds.setText(inputRef, text);
+if (typeof InputCmds.flushText === "function") InputCmds.flushText(inputRef);
+} finally { inCall = false; }
+return "called setText(handle, text)+flushText; handle is a " + typeof inputRef + " taken from " + refVia + "." + sig;
+} catch (e) { inCall = false; return "setText failed: " + (e && e.message); }
+}
+function fillReport(msg) {
+say("box fill: " + msg);
+if (!FILL_DEBUG) return;
+setTimeout(function () {
+try { alerts.showConfirmationAlert({ title: "Quick Decode box fill", content: msg, confirmText: "OK" }); } catch (e) {}
+}, 300);
+}
+function fillBox(message, answer) {
+if (!FILL_BOX) return;
+try {
+const text = String(answer || "").replace(/\s+/g, " ").trim();
+if (!text || text.length > 200) { fillReport("skipped: empty or too long answer"); return; }
+const ch = message.channel_id;
+const viewing = SelectedChannelStore && SelectedChannelStore.getChannelId();
+if (!SelectedChannelStore || viewing !== ch) { fillReport("skipped: not looking at that channel (viewing " + viewing + ", puzzle in " + ch + ")"); return; }
+const draft = currentDraft(ch);
+if (draft === null) { fillReport("skipped: cannot read the box (DraftStore missing)"); return; }
+if (draft.trim() !== "" && !(lastFill && lastFill.ch === ch && lastFill.text === draft)) { fillReport("skipped: the box already has text. getDraft gave " + rawDraftNote); return; }
+const used = setBox(ch, text);
+if (!used.length) { fillReport("no way to set the draft found (changeDraft/flux missing). input helpers: " + probeInput()); return; }
+lastFill = { ch: ch, text: text };
+const inputNote = pushToInput(text);
+const after = currentDraft(ch);
+fillReport("set the draft via " + used.join("+") + " to \"" + text + "\". Store now reads: " + JSON.stringify(after) +
+(after === text ? " (store took it)" : " (store did NOT take it)") + ". Input: " + inputNote);
+} catch (e) { fillReport("failed: " + (e && e.message)); }
+}
 const sentFor = {};
 function sendAnswer(message, answer) {
 try {
@@ -215,14 +303,58 @@ if (LOCAL_LINK && Date.now() >= localDownUntil) {
 const t0 = Date.now();
 try {
 const r = await localCall("/decode", payload(message), 1500);
-if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); if (AUTO_SEND) sendAnswer(message, r.answer); return; }
+if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); if (AUTO_SEND) sendAnswer(message, r.answer); else fillBox(message, r.answer); return; }
 say("local decode gave no answer (" + (r && r.answer) + ") -> using Discord");
+if (FILL_BOX) fillReport("not filled: the bot gave no answer over the local link (" + (r && r.answer) + "), so Discord was used instead");
 } catch (e) {
 linkDown(e);
 say("local link failed (" + (e && e.message) + ") -> using Discord");
+if (FILL_BOX) fillReport("not filled: local link failed (" + (e && e.message) + "), so Discord was used instead");
 }
+} else if (LOCAL_LINK && FILL_BOX) {
+fillReport("not filled: local link is marked down for another " + Math.ceil((localDownUntil - Date.now()) / 1000) + " s, so Discord was used instead");
 }
 runDecode(message);
+}
+const FLEE_CHUNK = 5;
+const FLEE_DELAY = 1100;
+const fleeBusy = {};
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function isHeistMap(m) {
+try {
+const t = (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawTitle || e.title || "") + " " + (e.rawDescription || e.description || ""); }).join(" ");
+return /heist\s*map/i.test(t);
+} catch (e) { return false; }
+}
+function sendText(ch, text) {
+try {
+if (MessageActions && MessageActions.sendMessage) {
+MessageActions.sendMessage(ch, { content: text, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, undefined, {});
+return true;
+}
+} catch (e) { say("flee sendMessage failed: " + (e && e.message)); }
+try { RestAPI.post({ url: "/channels/" + ch + "/messages", body: { content: text, nonce: nonce(), tts: false } }); return true; } catch (e) { say("flee REST failed: " + (e && e.message)); }
+return false;
+}
+async function fleeNow(message) {
+const ch = message.channel_id;
+if (fleeBusy[ch]) { say("flee already running"); return; }
+fleeBusy[ch] = true;
+try {
+if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { alertMsg("Flee: open the heist channel first"); return; }
+let r;
+try { r = await localCall("/flee", payload(message), 5000); }
+catch (e) { linkDown(e); alertMsg("Flee: bot not reachable (" + (e && e.message) + ")"); return; }
+if (!r || !r.ok) { alertMsg("Flee: " + ((r && r.answer) || "no answer")); return; }
+const steps = String(r.steps || "").toLowerCase().replace(/[^wasd]/g, "");
+if (!steps) { alertMsg("Flee: " + (r.answer || "nothing to send") + " - type Flee"); return; }
+say("flee route: " + steps);
+for (let i = 0; i < steps.length; i += FLEE_CHUNK) {
+if (i > 0) await sleep(FLEE_DELAY);
+if (SelectedChannelStore.getChannelId() !== ch) { say("flee stopped: left the channel"); return; }
+if (!sendText(ch, steps.slice(i, i + FLEE_CHUNK))) { alertMsg("Flee: could not send"); return; }
+}
+} finally { fleeBusy[ch] = false; }
 }
 function fire(message) {
 const now = Date.now();
@@ -331,14 +463,14 @@ const key = args[1];
 if (key !== "MessageLongPressActionSheet") return;
 const message = args[2] && args[2].message;
 if (!isPuzzle(message)) return;
-fire(message);
+if (isHeistMap(message)) fleeNow(message); else fire(message);
 if (HIDE_SHEET) setTimeout(function () { try { ActionSheet.hideActionSheet(); } catch (e) {} }, 120);
 }));
 }
 function buildStatus() {
 return "Quick Decode v17 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
 (cmdCache ? ", command cached" : ", command not cached yet") + (LOCAL_LINK ? ", local link: " + localState : "") +
-(AUTO_SEND ? ", auto-send: ON (" + (MessageActions && MessageActions.sendMessage ? "sendMessage ok" : "sendMessage MISSING, REST fallback") + ")" : ", auto-send: off") + ")";
+(AUTO_SEND ? ", auto-send: ON (" + (MessageActions && MessageActions.sendMessage ? "sendMessage ok" : "sendMessage MISSING, REST fallback") + ")" : "") + (FILL_BOX ? ", box fill: draftStore " + (DraftStore && DraftStore.getDraft ? "ok" : "MISSING") + ", changeDraft " + (DraftActions && DraftActions.changeDraft ? "ok" : "MISSING") + ", flux " + (Flux && Flux.dispatch ? "ok" : "MISSING") : "") + ")";
 }
 say(buildStatus());
 if (DEBUG) setTimeout(function () { alertMsg(buildStatus()); }, 6500);
