@@ -317,14 +317,24 @@ fillReport("not filled: local link is marked down for another " + Math.ceil((loc
 runDecode(message);
 }
 const FLEE_CHUNK = 5;
-const FLEE_DELAY = 1100;
+const FLEE_ROUNDS = 25;
+const FLEE_WAIT = 9000;
+const G = (typeof globalThis !== "undefined") ? globalThis : {};
 const fleeBusy = {};
-function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+const mapWaiters = [];
 function isHeistMap(m) {
 try {
 const t = (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawTitle || e.title || "") + " " + (e.rawDescription || e.description || ""); }).join(" ");
 return /heist\s*map/i.test(t);
 } catch (e) { return false; }
+}
+function mentionsMe(m) {
+try {
+const me = UserStore && UserStore.getCurrentUser && UserStore.getCurrentUser();
+if (!me) return true;
+const txt = (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawDescription || e.description || "") + " " + (e.rawTitle || e.title || ""); }).join(" ");
+return txt.indexOf("<@" + me.id + ">") >= 0 || txt.indexOf("<@!" + me.id + ">") >= 0;
+} catch (e) { return true; }
 }
 function sendText(ch, text) {
 try {
@@ -336,25 +346,78 @@ return true;
 try { RestAPI.post({ url: "/channels/" + ch + "/messages", body: { content: text, nonce: nonce(), tts: false } }); return true; } catch (e) { say("flee REST failed: " + (e && e.message)); }
 return false;
 }
+function onMapEvent(ev) {
+try {
+const m = ev && ev.message;
+if (!mapWaiters.length || !m || !m.id || !m.author || !m.author.bot || !isHeistMap(m) || !mentionsMe(m)) return;
+for (let i = mapWaiters.length - 1; i >= 0; i--) {
+const w = mapWaiters[i];
+if (w.ch === m.channel_id && !w.seen[m.id]) { mapWaiters.splice(i, 1); clearTimeout(w.t); w.done(m); }
+}
+} catch (e) {}
+}
+function waitForMap(ch, seen, ms) {
+return new Promise(function (resolve) {
+const w = { ch: ch, seen: seen, done: resolve, t: null };
+w.t = setTimeout(function () { const i = mapWaiters.indexOf(w); if (i >= 0) mapWaiters.splice(i, 1); resolve(null); }, ms);
+mapWaiters.push(w);
+});
+}
+function latestMap(ch, fallback) {
+try {
+const msgs = MessageStore.getMessages(ch);
+const arr = (msgs && (msgs.toArray ? msgs.toArray() : msgs._array)) || [];
+for (let i = arr.length - 1; i >= 0; i--) {
+const m = arr[i];
+if (m && m.author && m.author.bot && (m.embeds || []).length && isHeistMap(m) && mentionsMe(m)) return m;
+}
+} catch (e) {}
+return fallback;
+}
 async function fleeNow(message) {
 const ch = message.channel_id;
-if (fleeBusy[ch]) { say("flee already running"); return; }
+const now = Date.now();
+if (fleeBusy[ch] || (G.__qdFleeUntil && now < G.__qdFleeUntil)) { say("flee already running"); return; }
 fleeBusy[ch] = true;
+G.__qdFleeUntil = now + 120000;
 try {
 if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { alertMsg("Flee: open the heist channel first"); return; }
+let cur = latestMap(ch, message);
+const seen = {};
+seen[cur.id] = 1; seen[message.id] = 1;
+let prevLen = 1e9, stuck = 0;
+for (let round = 0; round < FLEE_ROUNDS; round++) {
+if (SelectedChannelStore.getChannelId() !== ch) { say("flee stopped: left the channel"); return; }
 let r;
-try { r = await localCall("/flee", payload(message), 5000); }
+try { r = await localCall("/flee", payload(cur), 5000); }
 catch (e) { linkDown(e); alertMsg("Flee: bot not reachable (" + (e && e.message) + ")"); return; }
 if (!r || !r.ok) { alertMsg("Flee: " + ((r && r.answer) || "no answer")); return; }
 const steps = String(r.steps || "").toLowerCase().replace(/[^wasd]/g, "");
-if (!steps) { alertMsg("Flee: " + (r.answer || "nothing to send") + " - type Flee"); return; }
-say("flee route: " + steps);
-for (let i = 0; i < steps.length; i += FLEE_CHUNK) {
-if (i > 0) await sleep(FLEE_DELAY);
-if (SelectedChannelStore.getChannelId() !== ch) { say("flee stopped: left the channel"); return; }
-if (!sendText(ch, steps.slice(i, i + FLEE_CHUNK))) { alertMsg("Flee: could not send"); return; }
+if (!steps) { say("flee: standing on the exit"); if (round === 0) alertMsg("Flee: you are on the exit - type Flee"); return; }
+if (steps.length >= prevLen) {
+stuck++;
+if (stuck >= 2) { alertMsg("Flee: stuck - the moves are not changing your position (wall or locked door?)"); return; }
+} else stuck = 0;
+prevLen = steps.length;
+say("flee route (" + steps.length + "): " + steps);
+const last = steps.length <= FLEE_CHUNK;
+const wait = last ? null : waitForMap(ch, seen, FLEE_WAIT);
+if (!sendText(ch, steps.slice(0, FLEE_CHUNK))) { alertMsg("Flee: could not send"); return; }
+if (last) return;
+const nm = await wait;
+if (!nm) { alertMsg("Flee: the bot did not answer with a new map"); return; }
+seen[nm.id] = 1;
+cur = nm;
 }
-} finally { fleeBusy[ch] = false; }
+alertMsg("Flee: stopped after " + FLEE_ROUNDS + " rounds");
+} finally { fleeBusy[ch] = false; G.__qdFleeUntil = 0; }
+}
+if (Flux && Flux.subscribe) {
+try {
+Flux.subscribe("MESSAGE_CREATE", onMapEvent);
+Flux.subscribe("MESSAGE_UPDATE", onMapEvent);
+unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onMapEvent); Flux.unsubscribe("MESSAGE_UPDATE", onMapEvent); } catch (e) {} });
+} catch (e) {}
 }
 function fire(message) {
 const now = Date.now();
@@ -394,86 +457,34 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 const spoofCache = {};
-function channelHasPuzzle(channelId) {
-const now = Date.now();
-const c = spoofCache[channelId];
-if (c && now - c.t < 8000) return c.v;
-let v = false;
-try {
-const msgs = MessageStore.getMessages(channelId);
-const arr = (msgs && (msgs.toArray ? msgs.toArray() : msgs._array)) || [];
-v = arr.slice(-40).some(isPuzzle);
-} catch (e) {}
-spoofCache[channelId] = { t: now, v: v };
-return v;
+function handleMessage(message) {
+if (!message || !message.id) return false;
+if (message.author && message.author.bot && isHeistMap(message) && mentionsMe(message)) {
+fleeNow(message);
+return true;
 }
-let spoofOK = false;
-if ((MODE === "double" || MODE === "both") && PermissionStore && PermissionStore.can && ADD_REACT !== undefined) {
-try {
-unpatches.push(instead("can", PermissionStore, function (args, orig) {
-const res = orig.apply(this, args);
-if (res) return res;
-try {
-if (args[0] === ADD_REACT && args[1] && args[1].id && channelHasPuzzle(args[1].id)) return true;
-} catch (e) {}
-return res;
-}));
-spoofOK = true;
-} catch (e) {}
+if (isPuzzle(message) && (MODE === "both" || MODE === "decode")) {
+fire(message);
+return true;
 }
-let hookA = false, hookB = false;
-const REACT_URL = /\/channels\/(\d+)\/messages\/(\d+)\/reactions\//;
-if (MODE === "double" || MODE === "both") {
-if (ReactionActions && MessageStore) {
+return false;
+}
 try {
-unpatches.push(instead("addReaction", ReactionActions, function (args, orig) {
+unpatches.push(instead("openLazy", ActionSheet, function (args, orig) {
 try {
-const m = MessageStore.getMessage(args[0], args[1]) || MessageStore.getMessage(args[1], args[0]);
-if (m && isPuzzle(m)) { fire(m); return; }
-} catch (e) {}
-return orig.apply(this, args);
-}));
-hookA = true;
-} catch (e) {}
-}
-if (RestAPI && MessageStore && RestAPI.put) {
-try {
-unpatches.push(instead("put", RestAPI, function (args, orig) {
-try {
-const url = args[0] && args[0].url;
-const hit = typeof url === "string" && REACT_URL.exec(url);
-if (hit) {
-const m = MessageStore.getMessage(hit[1], hit[2]);
-if (m && isPuzzle(m)) {
-fire(m);
-return Promise.resolve({ ok: true, status: 204, body: {}, headers: {} });
-}
-}
-} catch (e) {}
-return orig.apply(this, args);
-}));
-hookB = true;
-} catch (e) {}
-}
-if (!hookA && !hookB) say("double-tap hook unavailable, using hold");
-}
-if ((MODE === "hold" || MODE === "both" || !(hookA || hookB)) && ActionSheet && RestAPI) {
-unpatches.push(before("openLazy", ActionSheet, function (args) {
 const key = args[1];
-if (key !== "MessageLongPressActionSheet") return;
-const message = args[2] && args[2].message;
-if (!isPuzzle(message)) return;
-if (isHeistMap(message)) fleeNow(message); else fire(message);
-if (HIDE_SHEET) setTimeout(function () { try { ActionSheet.hideActionSheet(); } catch (e) {} }, 120);
+const ctx = args[2] || {};
+const message = ctx.message;
+if (key === "MessageLongPressActionSheet" && message && handleMessage(message) && HIDE_SHEET) return;
+} catch (e) { say("sheet patch error: " + (e && e.message)); }
+return orig.apply(this, args);
 }));
-}
-function buildStatus() {
-return "Quick Decode v17 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
-(cmdCache ? ", command cached" : ", command not cached yet") + (LOCAL_LINK ? ", local link: " + localState : "") +
-(AUTO_SEND ? ", auto-send: ON (" + (MessageActions && MessageActions.sendMessage ? "sendMessage ok" : "sendMessage MISSING, REST fallback") + ")" : "") + (FILL_BOX ? ", box fill: draftStore " + (DraftStore && DraftStore.getDraft ? "ok" : "MISSING") + ", changeDraft " + (DraftActions && DraftActions.changeDraft ? "ok" : "MISSING") + ", flux " + (Flux && Flux.dispatch ? "ok" : "MISSING") : "") + ")";
-}
-say(buildStatus());
-if (DEBUG) setTimeout(function () { alertMsg(buildStatus()); }, 6500);
-exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
+} catch (e) { say("could not patch ActionSheet: " + (e && e.message)); }
+exports.onLoad = function () { say("loaded"); };
+exports.onUnload = function () {
+unpatches.forEach(function (u) { try { u(); } catch (e) {} });
+unpatches.length = 0;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
