@@ -1,8 +1,8 @@
 {
-  "name": "fair Decode",
+  "name": "fake Decode",
   "description": "Double-tap a heist puzzle to decode it. Hold a Heist Map to flee: sends the route to the green door, 5 letters per message.",
   "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
-  "hash": "qd17",
+  "hash": "qd18",
   "vendetta": { "icon": "ic_message_edit" }
 }
