@@ -1,6 +1,6 @@
 {
-  "name": "Quick Decode",
-  "description": "Double-tap (or hold) a heist puzzle message and your Decode app runs instantly (no Apps menu).",
+  "name": "fair Decode",
+  "description": "Double-tap a heist puzzle to decode it. Hold a Heist Map to flee: sends the route to the green door, 5 letters per message.",
   "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
   "hash": "qd17",
