@@ -78,7 +78,7 @@ if (guildId) urls.push("/guilds/" + guildId + "/application-command-index");
 return new Promise(function (resolve, reject) {
 let left = urls.length, done = false, lastErr = null;
 function settle() { if (--left === 0 && !done) reject(lastErr || new Error("not in command list")); }
-urls.forEach(function (u) {
+  urls.forEach(function (u) {
 let p;
 try { p = RestAPI.get({ url: u }); } catch (e) { lastErr = e; settle(); return; }
 Promise.resolve(p).then(function (res) {
@@ -179,7 +179,7 @@ return { url: a.url, proxy_url: a.proxyURL || a.proxy_url, content_type: a.conte
 }
 function localCall(path, body, ms) {
 return new Promise(function (resolve, reject) {
-const t = setTimeout(function () { reject(new Error("timeout")); }, ms);
+  yconst t = setTimeout(function () { reject(new Error("timeout")); }, ms);
 let p;
 try {
 p = body ? fetch(LOCAL_URL + path, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(body) })
@@ -244,7 +244,7 @@ try {
 InputCmds.setText(inputRef, text);
 if (typeof InputCmds.flushText === "function") InputCmds.flushText(inputRef);
 } finally { inCall = false; }
-return "called setText(handle, text)+flushText; handle is a " + typeof inputRef + " taken from " + refVia + "." + sig;
+  return "called setText(handle, text)+flushText; handle is a " + typeof inputRef + " taken from " + refVia + "." + sig;
 } catch (e) { inCall = false; return "setText failed: " + (e && e.message); }
 }
 function fillReport(msg) {
@@ -305,7 +305,7 @@ try {
 const r = await localCall("/decode", payload(message), 1500);
 if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); if (AUTO_SEND) sendAnswer(message, r.answer); else fillBox(message, r.answer); return; }
 say("local decode gave no answer (" + (r && r.answer) + ") -> using Discord");
-if (FILL_BOX) fillReport("not filled: the bot gave no answer over the local link (" + (r && r.answer) + "), so Discord was used instead");
+  if (FILL_BOX) fillReport("not filled: the bot gave no answer over the local link (" + (r && r.answer) + "), so Discord was used instead");
 } catch (e) {
 linkDown(e);
 say("local link failed (" + (e && e.message) + ") -> using Discord");
@@ -315,6 +315,30 @@ if (FILL_BOX) fillReport("not filled: local link failed (" + (e && e.message) + 
 fillReport("not filled: local link is marked down for another " + Math.ceil((localDownUntil - Date.now()) / 1000) + " s, so Discord was used instead");
 }
 runDecode(message);
+}
+function askChoice(title, labels) {
+return new Promise(function (resolve) {
+let done = false;
+function finish(v) { if (done) return; done = true; resolve(v); }
+setTimeout(function () { finish(null); }, 180000);
+function show(i) {
+try {
+if (labels.length === 1) {
+alerts.showConfirmationAlert({ title: "Flee: stairs", content: title, confirmText: labels[0], cancelText: "Cancel",
+onConfirm: function () { finish(0); }, onCancel: function () { finish(null); } });
+} else if (labels.length === 2) {
+alerts.showConfirmationAlert({ title: "Flee: which stairs?", content: title, confirmText: labels[0], cancelText: labels[1],
+onConfirm: function () { finish(0); }, onCancel: function () { finish(1); } });
+} else {
+const last = i >= labels.length - 1;
+alerts.showConfirmationAlert({ title: "Flee: which stairs? (" + (i + 1) + "/" + labels.length + ")", content: title, confirmText: labels[i],
+cancelText: last ? "Cancel" : "Next",
+onConfirm: function () { finish(i); }, onCancel: function () { if (last) finish(null); else show(i + 1); } });
+}
+} catch (e) { finish(null); }
+}
+setTimeout(function () { show(0); }, 300);
+});
 }
 const FLEE_CHUNK = 5;
 const FLEE_ROUNDS = 25;
@@ -351,7 +375,8 @@ try {
 const m = ev && ev.message;
 if (!mapWaiters.length || !m || !m.id || !m.author || !m.author.bot || !isHeistMap(m) || !mentionsMe(m)) return;
 for (let i = mapWaiters.length - 1; i >= 0; i--) {
-const w = mapWaiters[i];
+  
+  const w = mapWaiters[i];
 if (w.ch === m.channel_id && !w.seen[m.id]) { mapWaiters.splice(i, 1); clearTimeout(w.t); w.done(m); }
 }
 } catch (e) {}
@@ -385,15 +410,25 @@ if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { alert
 let cur = latestMap(ch, message);
 const seen = {};
 seen[cur.id] = 1; seen[message.id] = 1;
-let prevLen = 1e9, stuck = 0;
+let prevLen = 1e9, stuck = 0, choice = null, asks = 0;
 for (let round = 0; round < FLEE_ROUNDS; round++) {
 if (SelectedChannelStore.getChannelId() !== ch) { say("flee stopped: left the channel"); return; }
 let r;
-try { r = await localCall("/flee", payload(cur), 5000); }
+try { r = await localCall("/flee", Object.assign(payload(cur), { buttons: true, choice: choice }), 5000); }
 catch (e) { linkDown(e); alertMsg("Flee: bot not reachable (" + (e && e.message) + ")"); return; }
+choice = null;
+if (r && !r.ok && r.ask && r.ask.length && asks < 4) {
+asks++;
+const idx = await askChoice(r.answer || "Which stairs go DOWN?", r.ask);
+if (idx === null || idx === undefined) { say("flee: stairs question not answered"); return; }
+choice = idx;
+round--;
+continue;
+}
 if (!r || !r.ok) { alertMsg("Flee: " + ((r && r.answer) || "no answer")); return; }
 const steps = String(r.steps || "").toLowerCase().replace(/[^wasd]/g, "");
-if (!steps) { say("flee: standing on the exit"); if (round === 0) alertMsg("Flee: you are on the exit - type Flee"); return; }
+const stairs = /STAIRS/.test(String(r.answer || ""));
+if (!steps) { say("flee: nothing to move"); if (round === 0) alertMsg(stairs ? "Flee: " + r.answer : "Flee: you are on the exit - type Flee"); return; }
 if (steps.length >= prevLen) {
 stuck++;
 if (stuck >= 2) { alertMsg("Flee: stuck - the moves are not changing your position (wall or locked door?)"); return; }
@@ -401,13 +436,14 @@ if (stuck >= 2) { alertMsg("Flee: stuck - the moves are not changing your positi
 prevLen = steps.length;
 say("flee route (" + steps.length + "): " + steps);
 const last = steps.length <= FLEE_CHUNK;
-const wait = last ? null : waitForMap(ch, seen, FLEE_WAIT);
+const wait = (!last || stairs) ? waitForMap(ch, seen, FLEE_WAIT) : null;
 if (!sendText(ch, steps.slice(0, FLEE_CHUNK))) { alertMsg("Flee: could not send"); return; }
-if (last) return;
+if (last && !stairs) return;
 const nm = await wait;
 if (!nm) { alertMsg("Flee: the bot did not answer with a new map"); return; }
 seen[nm.id] = 1;
 cur = nm;
+if (last && stairs) { prevLen = 1e9; stuck = 0; }
 }
 alertMsg("Flee: stopped after " + FLEE_ROUNDS + " rounds");
 } finally { fleeBusy[ch] = false; G.__qdFleeUntil = 0; }
@@ -416,7 +452,8 @@ if (Flux && Flux.subscribe) {
 try {
 Flux.subscribe("MESSAGE_CREATE", onMapEvent);
 Flux.subscribe("MESSAGE_UPDATE", onMapEvent);
-unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onMapEvent); Flux.unsubscribe("MESSAGE_UPDATE", onMapEvent); } catch (e) {} });
+  
+  unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onMapEvent); Flux.unsubscribe("MESSAGE_UPDATE", onMapEvent); } catch (e) {} });
 } catch (e) {}
 }
 function fire(message) {
