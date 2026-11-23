@@ -498,7 +498,7 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
 // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
-const FAST_GAP = 40;            // ms between the messages of Fast flee (0 = back to back, no waiting)
+const FAST_GAP = 1000;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
 function chunkSteps(steps) { const out = []; for (let i = 0; i < steps.length; i += FLEE_CHUNK) out.push(steps.slice(i, i + FLEE_CHUNK)); return out; }
@@ -677,12 +677,55 @@ try {
 unpatches.push(instead(name, RA, function (args, orig) {
 let ch = args[0], id = args[1];
 if (ch && typeof ch === "object") { id = ch.messageId || ch.id; ch = ch.channelId || ch.channel_id; }
-if (tapPuzzle(ch, id)) return;
+if (tapPuzzle(ch, id) || tapPuzzle(id, ch)) return;
 return orig.apply(this, args);
 }));
 } catch (e) { say("could not patch " + name + ": " + (e && e.message)); }
 });
 });
+// ---- from the old plugin: P = let Discord allow the double-tap reaction in puzzle channels (otherwise the tap is blocked before any hook runs)
+const puzzleChan = {};
+function channelHasPuzzle(channelId) {
+const now = Date.now(), c = puzzleChan[channelId];
+if (c && now - c.t < 8000) return c.v;
+let v = false;
+try {
+const msgs = MessageStore.getMessages(channelId);
+const arr = (msgs && (msgs.toArray ? msgs.toArray() : msgs._array)) || [];
+v = arr.slice(-40).some(isPuzzle);
+} catch (e) {}
+puzzleChan[channelId] = { t: now, v: v };
+return v;
+}
+let hookP = false, hookB = false;
+if ((MODE === "both" || MODE === "decode") && PermissionStore && PermissionStore.can && ADD_REACT !== undefined) {
+try {
+unpatches.push(instead("can", PermissionStore, function (args, orig) {
+const res = orig.apply(this, args);
+if (res) return res;
+try { if (args[0] === ADD_REACT && args[1] && args[1].id && channelHasPuzzle(args[1].id)) return true; } catch (e) {}
+return res;
+}));
+hookP = true;
+} catch (e) { say("permission spoof failed: " + (e && e.message)); }
+}
+// ---- B = catch the REST call that adds the reaction, solve the puzzle instead, and fake a success answer
+const REACT_URL = /\/channels\/(\d+)\/messages\/(\d+)\/reactions\//;
+if ((MODE === "both" || MODE === "decode") && RestAPI && MessageStore && RestAPI.put) {
+try {
+unpatches.push(instead("put", RestAPI, function (args, orig) {
+try {
+const url = args[0] && args[0].url;
+const hit = typeof url === "string" && REACT_URL.exec(url);
+if (hit && tapPuzzle(hit[1], hit[2])) return Promise.resolve({ ok: true, status: 204, body: {}, headers: {} });
+} catch (e) {}
+return orig.apply(this, args);
+}));
+hookB = true;
+} catch (e) { say("REST hook failed: " + (e && e.message)); }
+}
+say("double-tap hooks: A " + (reactionMods.length ? "ok" : "-") + ", B " + (hookB ? "ok" : "-") + ", P " + (hookP ? "ok" : "-"));
+
 // catch-all: if Discord's double-tap still adds a reaction by another route, the reaction event solves the puzzle
 function onMyReaction(ev) {
 try {
