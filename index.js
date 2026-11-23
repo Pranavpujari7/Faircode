@@ -16,7 +16,9 @@ const PREFETCH = true;
 const CMD_ID = "";
 const CMD_VERSION = "";
 const { findByProps, findByStoreName } = vendetta.metro;
-const { before, instead } = vendetta.patcher;
+const { before, instead, after } = vendetta.patcher;
+const React = vendetta.metro.common.React;
+const findInReactTree = (vendetta.utils && vendetta.utils.findInReactTree) || function () { return null; };
 const alerts = vendetta.ui.alerts;
 let lastAlert = 0;
 function say(msg) { try { console.log("[QuickDecode] " + msg); } catch (e) {} }
@@ -179,7 +181,7 @@ return { url: a.url, proxy_url: a.proxyURL || a.proxy_url, content_type: a.conte
 }
 function localCall(path, body, ms) {
 return new Promise(function (resolve, reject) {
-  yconst t = setTimeout(function () { reject(new Error("timeout")); }, ms);
+const t = setTimeout(function () { reject(new Error("timeout")); }, ms);
 let p;
 try {
 p = body ? fetch(LOCAL_URL + path, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(body) })
@@ -340,6 +342,7 @@ onConfirm: function () { finish(i); }, onCancel: function () { if (last) finish(
 setTimeout(function () { show(0); }, 300);
 });
 }
+// part 2
 const FLEE_CHUNK = 5;
 const FLEE_ROUNDS = 25;
 const FLEE_WAIT = 9000;
@@ -493,6 +496,159 @@ localCall("/ping", null, 2000).then(function (j) { localState = j && j.ok ? "ok"
 function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e); });
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
+
+// ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
+const FAST_GAP = 0;            // ms between the messages of Fast flee (0 = back to back, no waiting)
+const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
+function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
+function chunkSteps(steps) { const out = []; for (let i = 0; i < steps.length; i += FLEE_CHUNK) out.push(steps.slice(i, i + FLEE_CHUNK)); return out; }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function claim(ch) {
+if (fleeBusy[ch] || (G.__qdFleeUntil && Date.now() < G.__qdFleeUntil)) { alertMsg("Already running - wait for it to finish"); return false; }
+fleeBusy[ch] = true; G.__qdFleeUntil = Date.now() + 300000; return true;
+}
+function release(ch) { fleeBusy[ch] = false; G.__qdFleeUntil = 0; }
+function inChannel(ch) { return SelectedChannelStore && SelectedChannelStore.getChannelId() === ch; }
+
+// FAST FLEE: ONE call to the bot, then ALL the 5-letter messages are sent back to back (no waiting for any map)
+async function fastFleeCore(ch, cur) {
+let choice = null, asks = 0;
+for (let k = 0; k < 6; k++) {
+let r;
+try { r = await localCall("/fastflee", Object.assign(payload(cur), { buttons: true, choice: choice }), 8000); }
+catch (e) { linkDown(e); alertMsg("Fast flee: bot not reachable (" + (e && e.message) + ")"); return false; }
+choice = null;
+if (r && !r.ok && r.ask && r.ask.length && asks < 4) {
+asks++;
+const idx = await askChoice(r.answer || "Which stairs go DOWN?", r.ask);
+if (idx === null || idx === undefined) return false;
+choice = idx; continue;
+}
+if (!r || !r.ok) { alertMsg("Fast flee: " + ((r && r.answer) || "no answer")); return false; }
+let chunks = (r.chunks && r.chunks.length) ? r.chunks.map(cleanSteps).filter(Boolean) : chunkSteps(cleanSteps(r.steps));
+if (!chunks.length) { alertMsg("Fast flee: " + (r.answer || "nothing to move")); return false; }
+say("fast flee " + chunks.length + " messages: " + chunks.join(" "));
+for (let i = 0; i < chunks.length; i++) {
+if (!sendText(ch, chunks[i])) { alertMsg("Fast flee: could not send"); return false; }
+if (FAST_GAP) await sleep(FAST_GAP);
+}
+return true;
+}
+return false;
+}
+async function fastFleeNow(message) {
+const ch = message.channel_id;
+if (!inChannel(ch)) { alertMsg("Fast flee: open the heist channel first"); return; }
+if (!claim(ch)) return;
+try { await fastFleeCore(ch, latestMap(ch, message)); } finally { release(ch); }
+}
+
+// AUTO LOOT / AUTO HEIST: bot says the next moves, plugin sends them, waits for the new map, repeats
+async function autoLoop(ch, cur, path, label, extra) {
+const seen = {}; seen[cur.id] = 1;
+for (let round = 0; round < AUTO_ROUNDS; round++) {
+if (!inChannel(ch)) { say(label + " stopped: left the channel"); return "left"; }
+let r;
+try { r = await localCall(path, Object.assign(payload(cur), { n: FLEE_CHUNK, reset: round === 0 }, extra || {}), 8000); }
+catch (e) { linkDown(e); alertMsg(label + ": bot not reachable (" + (e && e.message) + ")"); return "error"; }
+if (r && r.done) { say(label + " done: " + (r.answer || "")); return "done"; }
+const steps = cleanSteps(r && r.steps);
+if (!r || !r.ok || !steps) { alertMsg(label + ": " + ((r && r.answer) || "no answer")); return "error"; }
+const wait = waitForMap(ch, seen, FLEE_WAIT);
+if (!sendText(ch, steps.slice(0, FLEE_CHUNK))) { alertMsg(label + ": could not send"); return "error"; }
+const nm = await wait;
+if (!nm) { alertMsg(label + ": the bot did not answer with a new map"); return "error"; }
+seen[nm.id] = 1; cur = nm;
+}
+alertMsg(label + ": stopped after " + AUTO_ROUNDS + " rounds");
+return "limit";
+}
+async function autoLootNow(message) {
+const ch = message.channel_id;
+if (!inChannel(ch)) { alertMsg("Auto loot: open the heist channel first"); return; }
+if (!claim(ch)) return;
+try { await autoLoop(ch, latestMap(ch, message), "/loot", "Auto loot"); } finally { release(ch); }
+}
+// Auto heist = scout the whole floor (Scout), then Fast flee out
+async function autoHeistNow(message) {
+const ch = message.channel_id;
+if (!inChannel(ch)) { alertMsg("Auto heist: open the heist channel first"); return; }
+if (!claim(ch)) return;
+try {
+const res = await autoLoop(ch, latestMap(ch, message), "/scout", "Auto heist");
+if (res === "done") await fastFleeCore(ch, latestMap(ch, message));
+} finally { release(ch); }
+}
+const MENU = [
+{ label: "Flee", run: function (m) { fleeNow(m); } },
+{ label: "Fast flee", run: function (m) { fastFleeNow(m); } },
+{ label: "Auto loot", run: function (m) { autoLootNow(m); } },
+{ label: "Auto heist", run: function (m) { autoHeistNow(m); } },
+];
+function hideSheet() { try { ActionSheet.hideActionSheet(); } catch (e) {} }
+// fallback menu (only used if the rows can't be added to Discord's own sheet)
+function altMenu(message, i) {
+i = i || 0;
+const it = MENU[i], last = i >= MENU.length - 1;
+try {
+alerts.showConfirmationAlert({ title: "Heist", content: it.label + "?", confirmText: it.label, cancelText: last ? "Close" : "Next",
+onConfirm: function () { it.run(message); }, onCancel: function () { if (!last) altMenu(message, i + 1); } });
+} catch (e) {}
+}
+let sheetFailed = false;
+function addRows(message, tree) {
+const rows = findInReactTree(tree, function (x) { return Array.isArray(x) && x.length > 1 && x[0] && x[0].props && typeof x[0].props.label === "string" && x[0].type; });
+if (!rows) return false;
+const base = rows[0];
+const made = MENU.map(function (it, k) {
+return React.createElement(base.type, Object.assign({}, base.props, { key: "qd-" + k, label: it.label, onPress: function () { hideSheet(); setTimeout(function () { it.run(message); }, 150); } }));
+});
+rows.splice.apply(rows, [1, 0].concat(made));
+return true;
+}
+function patchSheet(args) {
+const key = args[1], ctx = args[2] || {}, message = ctx.message;
+if (key !== "MessageLongPressActionSheet" || !message || !message.author || !message.author.bot || !isHeistMap(message)) return;
+if (sheetFailed) { setTimeout(function () { altMenu(message, 0); }, 350); return; }
+Promise.resolve(args[0]).then(function (instance) {
+if (!instance || typeof instance.default !== "function") { sheetFailed = true; altMenu(message, 0); return; }
+const un = after("default", instance, function (_a, comp) {
+try { React.useEffect(function () { return function () { un(); }; }, []); } catch (e) {}
+let ok = false;
+try { ok = addRows(message, comp); } catch (e) { say("add rows failed: " + (e && e.message)); }
+if (!ok) { sheetFailed = true; say("could not add rows to the sheet - using the pop-up menu from now on"); setTimeout(function () { altMenu(message, 0); }, 350); }
+return comp;
+});
+}, function () {});
+}
+
+// DOUBLE TAP on a puzzle (Discord's quick-react gesture) = decode + send the answer, no reaction
+const lastTap = {};
+function tapPuzzle(channelId, messageId) {
+try {
+const m = MessageStore && MessageStore.getMessage && MessageStore.getMessage(channelId, messageId);
+if (!m || !isPuzzle(m) || !(MODE === "both" || MODE === "decode")) return false;
+const now = Date.now();
+if (lastTap[messageId] && now - lastTap[messageId] < 1500) return true;
+lastTap[messageId] = now;
+fire(m);
+return true;
+} catch (e) { return false; }
+}
+if (ReactionActions) {
+["addReaction", "toggleReaction"].forEach(function (name) {
+if (typeof ReactionActions[name] !== "function") return;
+try {
+unpatches.push(instead(name, ReactionActions, function (args, orig) {
+let ch = args[0], id = args[1];
+if (ch && typeof ch === "object") { id = ch.messageId || ch.id; ch = ch.channelId || ch.channel_id; }
+if (tapPuzzle(ch, id)) return;
+return orig.apply(this, args);
+}));
+} catch (e) { say("could not patch " + name + ": " + (e && e.message)); }
+});
+}
+
 const spoofCache = {};
 function handleMessage(message) {
 if (!message || !message.id) return false;
@@ -507,14 +663,8 @@ return true;
 return false;
 }
 try {
-unpatches.push(instead("openLazy", ActionSheet, function (args, orig) {
-try {
-const key = args[1];
-const ctx = args[2] || {};
-const message = ctx.message;
-if (key === "MessageLongPressActionSheet" && message && handleMessage(message) && HIDE_SHEET) return;
-} catch (e) { say("sheet patch error: " + (e && e.message)); }
-return orig.apply(this, args);
+unpatches.push(before("openLazy", ActionSheet, function (args) {
+try { patchSheet(args); } catch (e) { say("sheet patch error: " + (e && e.message)); }
 }));
 } catch (e) { say("could not patch ActionSheet: " + (e && e.message)); }
 exports.onLoad = function () { say("loaded"); };
@@ -525,3 +675,4 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
+                                                  
