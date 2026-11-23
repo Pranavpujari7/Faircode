@@ -342,7 +342,7 @@ onConfirm: function () { finish(i); }, onCancel: function () { if (last) finish(
 setTimeout(function () { show(0); }, 300);
 });
 }
-// part 2
+  // part 2
 const FLEE_CHUNK = 5;
 const FLEE_ROUNDS = 25;
 const FLEE_WAIT = 9000;
@@ -498,7 +498,7 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
 // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
-const FAST_GAP = 0;            // ms between the messages of Fast flee (0 = back to back, no waiting)
+const FAST_GAP = 40;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
 function chunkSteps(steps) { const out = []; for (let i = 0; i < steps.length; i += FLEE_CHUNK) out.push(steps.slice(i, i + FLEE_CHUNK)); return out; }
@@ -510,37 +510,68 @@ fleeBusy[ch] = true; G.__qdFleeUntil = Date.now() + 300000; return true;
 function release(ch) { fleeBusy[ch] = false; G.__qdFleeUntil = 0; }
 function inChannel(ch) { return SelectedChannelStore && SelectedChannelStore.getChannelId() === ch; }
 
-// FAST FLEE: ONE call to the bot, then ALL the 5-letter messages are sent back to back (no waiting for any map)
+// FAST FLEE: ask the bot for the WHOLE route, send ALL the 5-letter messages back to back,
+// wait for the new map, plan again - and keep going until you are standing on the exit.
+const FAST_ROUNDS = 15;        // max plan -> send rounds (floors, stairs, blind spots)
+const FAST_SETTLE = 1500;      // ms of silence after the last bot map before planning again
+// returns: "sent" (messages sent) | "exit" (you are on the exit) | "wait" (on a ladder, wait for next floor) | "cancel" | "error"
 async function fastFleeCore(ch, cur) {
 let choice = null, asks = 0;
 for (let k = 0; k < 6; k++) {
 let r;
 try { r = await localCall("/fastflee", Object.assign(payload(cur), { buttons: true, choice: choice }), 8000); }
-catch (e) { linkDown(e); alertMsg("Fast flee: bot not reachable (" + (e && e.message) + ")"); return false; }
+catch (e) { linkDown(e); alertMsg("Fast flee: bot not reachable (" + (e && e.message) + ")"); return "error"; }
 choice = null;
 if (r && !r.ok && r.ask && r.ask.length && asks < 4) {
 asks++;
 const idx = await askChoice(r.answer || "Which stairs go DOWN?", r.ask);
-if (idx === null || idx === undefined) return false;
+if (idx === null || idx === undefined) return "cancel";
 choice = idx; continue;
 }
-if (!r || !r.ok) { alertMsg("Fast flee: " + ((r && r.answer) || "no answer")); return false; }
+if (!r || !r.ok) { alertMsg("Fast flee: " + ((r && r.answer) || "no answer")); return "error"; }
 let chunks = (r.chunks && r.chunks.length) ? r.chunks.map(cleanSteps).filter(Boolean) : chunkSteps(cleanSteps(r.steps));
-if (!chunks.length) { alertMsg("Fast flee: " + (r.answer || "nothing to move")); return false; }
+if (!chunks.length) {
+const a = String(r.answer || "");
+if (/on the exit/i.test(a)) { say("fast flee: on the exit - done"); return "exit"; }
+if (/ladder|stairs/i.test(a)) { say("fast flee: on the ladder - waiting for the next floor"); return "wait"; }
+alertMsg("Fast flee: " + (a || "nothing to move")); return "error";
+}
 say("fast flee " + chunks.length + " messages: " + chunks.join(" "));
 for (let i = 0; i < chunks.length; i++) {
-if (!sendText(ch, chunks[i])) { alertMsg("Fast flee: could not send"); return false; }
+if (!sendText(ch, chunks[i])) { alertMsg("Fast flee: could not send"); return "error"; }
 if (FAST_GAP) await sleep(FAST_GAP);
 }
-return true;
+return "sent";
 }
-return false;
+return "error";
+}
+async function fastFleeLoop(ch, cur) {
+const seen = {}; seen[cur.id] = 1;
+for (let round = 0; round < FAST_ROUNDS; round++) {
+if (!inChannel(ch)) { say("fast flee stopped: left the channel"); return "left"; }
+const wait = waitForMap(ch, seen, FLEE_WAIT);          // listen BEFORE sending so no map is missed
+const st = await fastFleeCore(ch, cur);
+if (st === "exit") return "exit";
+if (st !== "sent" && st !== "wait") return st;
+let nm = await wait;
+if (!nm) { alertMsg("Fast flee: the bot did not answer with a new map"); return "error"; }
+seen[nm.id] = 1;
+for (let g = 0; g < 12; g++) {                         // the bot answers every message: wait until the last map is in
+const n2 = await waitForMap(ch, seen, FAST_SETTLE);
+if (!n2) break;
+seen[n2.id] = 1; nm = n2;
+}
+cur = latestMap(ch, nm);
+seen[cur.id] = 1;
+}
+alertMsg("Fast flee: stopped after " + FAST_ROUNDS + " rounds");
+return "limit";
 }
 async function fastFleeNow(message) {
 const ch = message.channel_id;
 if (!inChannel(ch)) { alertMsg("Fast flee: open the heist channel first"); return; }
 if (!claim(ch)) return;
-try { await fastFleeCore(ch, latestMap(ch, message)); } finally { release(ch); }
+try { await fastFleeLoop(ch, latestMap(ch, message)); } finally { release(ch); }
 }
 
 // AUTO LOOT / AUTO HEIST: bot says the next moves, plugin sends them, waits for the new map, repeats
@@ -576,7 +607,7 @@ if (!inChannel(ch)) { alertMsg("Auto heist: open the heist channel first"); retu
 if (!claim(ch)) return;
 try {
 const res = await autoLoop(ch, latestMap(ch, message), "/scout", "Auto heist");
-if (res === "done") await fastFleeCore(ch, latestMap(ch, message));
+if (res === "done") await fastFleeLoop(ch, latestMap(ch, message));
 } finally { release(ch); }
 }
 const MENU = [
@@ -635,11 +666,15 @@ fire(m);
 return true;
 } catch (e) { return false; }
 }
-if (ReactionActions) {
-["addReaction", "toggleReaction"].forEach(function (name) {
-if (typeof ReactionActions[name] !== "function") return;
+const reactionMods = (function () {
+try { const all = vendetta.metro.findByPropsAll("addReaction"); if (all && all.length) return all; } catch (e) {}
+return ReactionActions ? [ReactionActions] : [];
+})();
+reactionMods.forEach(function (RA) {
+["addReaction", "toggleReaction", "addReactionWithBurst"].forEach(function (name) {
+if (!RA || typeof RA[name] !== "function") return;
 try {
-unpatches.push(instead(name, ReactionActions, function (args, orig) {
+unpatches.push(instead(name, RA, function (args, orig) {
 let ch = args[0], id = args[1];
 if (ch && typeof ch === "object") { id = ch.messageId || ch.id; ch = ch.channelId || ch.channel_id; }
 if (tapPuzzle(ch, id)) return;
@@ -647,6 +682,24 @@ return orig.apply(this, args);
 }));
 } catch (e) { say("could not patch " + name + ": " + (e && e.message)); }
 });
+});
+// catch-all: if Discord's double-tap still adds a reaction by another route, the reaction event solves the puzzle
+function onMyReaction(ev) {
+try {
+const me = UserStore && UserStore.getCurrentUser && UserStore.getCurrentUser();
+if (!ev || !me || ev.userId !== me.id) return;
+const ch = ev.channelId, id = ev.messageId;
+if (!tapPuzzle(ch, id)) return;
+setTimeout(function () {
+try { ReactionActions.removeReaction(ch, id, ev.emoji, undefined, me.id); } catch (e) {}
+}, 500);
+} catch (e) {}
+}
+if (Flux && Flux.subscribe) {
+try {
+Flux.subscribe("MESSAGE_REACTION_ADD", onMyReaction);
+unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_REACTION_ADD", onMyReaction); } catch (e) {} });
+} catch (e) {}
 }
 
 const spoofCache = {};
@@ -675,4 +728,4 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
-                                                  
+  
