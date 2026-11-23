@@ -341,7 +341,7 @@ onConfirm: function () { finish(i); }, onCancel: function () { if (last) finish(
 }
 setTimeout(function () { show(0); }, 300);
 });
-}
+  }
   // part 2
 const FLEE_CHUNK = 5;
 const FLEE_ROUNDS = 25;
@@ -697,17 +697,26 @@ v = arr.slice(-40).some(isPuzzle);
 puzzleChan[channelId] = { t: now, v: v };
 return v;
 }
-let hookP = false, hookB = false;
-if ((MODE === "both" || MODE === "decode") && PermissionStore && PermissionStore.can && ADD_REACT !== undefined) {
+let hookP = false, hookB = false, hookM = false;
+function isAddReact(p) { try { return (ADD_REACT !== undefined && p === ADD_REACT) || String(p) === "64"; } catch (e) { return false; } }
+function chanIdOf(x) { if (!x) return null; if (typeof x === "string") return x; return x.id || x.channelId || x.channel_id || null; }
+if ((MODE === "both" || MODE === "decode") && PermissionStore) {
+["can", "canBasicChannel", "canWithPartialContext"].forEach(function (name) {
+if (typeof PermissionStore[name] !== "function") return;
 try {
-unpatches.push(instead("can", PermissionStore, function (args, orig) {
+unpatches.push(instead(name, PermissionStore, function (args, orig) {
 const res = orig.apply(this, args);
 if (res) return res;
-try { if (args[0] === ADD_REACT && args[1] && args[1].id && channelHasPuzzle(args[1].id)) return true; } catch (e) {}
+try {
+if (isAddReact(args[0])) {
+for (let i = 1; i < args.length && i < 4; i++) { const id = chanIdOf(args[i]); if (id && channelHasPuzzle(id)) return true; }
+}
+} catch (e) {}
 return res;
 }));
 hookP = true;
-} catch (e) { say("permission spoof failed: " + (e && e.message)); }
+} catch (e) { say("permission spoof " + name + " failed: " + (e && e.message)); }
+});
 }
 // ---- B = catch the REST call that adds the reaction, solve the puzzle instead, and fake a success answer
 const REACT_URL = /\/channels\/(\d+)\/messages\/(\d+)\/reactions\//;
@@ -725,6 +734,60 @@ hookB = true;
 } catch (e) { say("REST hook failed: " + (e && e.message)); }
 }
 say("double-tap hooks: A " + (reactionMods.length ? "ok" : "-") + ", B " + (hookB ? "ok" : "-") + ", P " + (hookP ? "ok" : "-"));
+
+// ---- M = double tap straight on the puzzle image: 1st tap waits a moment (then opens the image as usual), 2nd tap = solve
+function urlsOf(o, out, d) {
+if (!o || d > 5 || out.length > 60) return;
+if (typeof o === "string") { if (/^https?:/.test(o)) out.push(o); return; }
+if (typeof o !== "object") return;
+let keys; try { keys = Object.keys(o); } catch (e) { return; }
+for (let k = 0; k < keys.length && k < 40; k++) { let v; try { v = o[keys[k]]; } catch (e) { continue; } urlsOf(v, out, d + 1); }
+}
+function fileKey(u) { try { return u.split("?")[0].split("/").slice(-2).join("/"); } catch (e) { return u; } }
+function puzzleByUrls(ch, urls) {
+const want = {}; urls.forEach(function (u) { want[fileKey(u)] = 1; });
+const msgs = MessageStore.getMessages(ch);
+const arr = (msgs && (msgs.toArray ? msgs.toArray() : msgs._array)) || [];
+for (let i = arr.length - 1; i >= 0 && i >= arr.length - 60; i--) {
+const m = arr[i];
+if (!m || !isPuzzle(m)) continue;
+const mine = []; urlsOf(m.embeds, mine, 0); urlsOf(m.attachments, mine, 0);
+if (mine.some(function (u) { return want[fileKey(u)]; })) return m;
+}
+return null;
+}
+  // part 3
+const mediaTap = {};
+["openMediaModal", "openMediaViewer", "openLightbox"].forEach(function (name) {
+let mod = null;
+try { mod = findByProps(name); } catch (e) {}
+if (!mod || typeof mod[name] !== "function") return;
+try {
+unpatches.push(instead(name, mod, function (args, orig) {
+const self = this;
+try {
+if (MODE === "both" || MODE === "decode") {
+const ch = SelectedChannelStore.getChannelId();
+const urls = []; urlsOf(args, urls, 0);
+const m = urls.length ? puzzleByUrls(ch, urls) : null;
+if (m) {
+const t = mediaTap[m.id];
+if (t && Date.now() - t.at < 800) { clearTimeout(t.timer); delete mediaTap[m.id]; say("image double-tap"); fire(m); return; }
+const rec = { at: Date.now() };
+rec.timer = setTimeout(function () { delete mediaTap[m.id]; try { orig.apply(self, args); } catch (e) {} }, 650);
+mediaTap[m.id] = rec;
+return;
+}
+}
+} catch (e) {}
+return orig.apply(self, args);
+}));
+hookM = true;
+} catch (e) { say("media hook " + name + " failed: " + (e && e.message)); }
+});
+function hookStatus() { return "double-tap hooks: reaction " + (reactionMods.length ? "ok" : "-") + ", REST " + (hookB ? "ok" : "-") + ", permission " + (hookP ? "ok" : "-") + ", image " + (hookM ? "ok" : "-"); }
+say(hookStatus());
+if (DEBUG) setTimeout(function () { alertMsg(hookStatus()); }, 6500);
 
 // catch-all: if Discord's double-tap still adds a reaction by another route, the reaction event solves the puzzle
 function onMyReaction(ev) {
@@ -771,4 +834,3 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
-  
