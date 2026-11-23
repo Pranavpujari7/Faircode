@@ -1,5 +1,5 @@
 {
-  "name": "heist Decode",
+  "name": "Decode",
   "description": "Decode command with Flee, Fast flee, Auto loot and Auto heist.",
   "authors": [
     {
@@ -7,7 +7,7 @@
     }
   ],
   "main": "index.js",
-  "hash": "411ce73ae2deecf4fd5a9389067ebaf3c9f7c4e59ef0b367f73f28d3917ec46d",
+  "hash": "f0b33212df6ab9736bb2c7f89e47d00af8aa3b08c26377426cbfb1315897ee1b",
   "vendetta": {
     "icon": "ic_message_edit"
   }
