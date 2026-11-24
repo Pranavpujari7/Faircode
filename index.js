@@ -233,7 +233,7 @@ if (name === "setText" && !seenSig) seenSig = Array.prototype.map.call(args, fun
 } catch (e) {}
 });
 }
-// ===== PART 2 =====
+  // ===== PART 2 =====
 function pushToInput(text) {
 try {
 if (!InputCmds || typeof InputCmds.setText !== "function") return "no setText helper";
@@ -431,7 +431,7 @@ continue;
 if (!r || !r.ok) { alertMsg("Flee: " + ((r && r.answer) || "no answer")); return; }
 const steps = String(r.steps || "").toLowerCase().replace(/[^wasd]/g, "");
 const stairs = /STAIRS/.test(String(r.answer || ""));
-if (!steps) { say("flee: nothing to move"); if (round === 0) alertMsg(stairs ? "Flee: " + r.answer : "Flee: you are on the exit - type Flee"); return; }
+if (!steps) { say("flee: nothing to move"); if (round === 0 && stairs) alertMsg("Flee: " + r.answer); return; }
 if (steps.length >= prevLen) {
 stuck++;
 if (stuck >= 2) { alertMsg("Flee: stuck - the moves are not changing your position (wall or locked door?)"); return; }
@@ -496,7 +496,6 @@ localCall("/ping", null, 2000).then(function (j) { localState = j && j.ok ? "ok"
 function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e); });
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
-
 // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
 const FAST_GAP = 300;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
@@ -532,9 +531,8 @@ if (!r || !r.ok) { alertMsg("Fast flee: " + ((r && r.answer) || "no answer")); r
 let chunks = (r.chunks && r.chunks.length) ? r.chunks.map(cleanSteps).filter(Boolean) : chunkSteps(cleanSteps(r.steps));
 if (!chunks.length) {
 const a = String(r.answer || "");
-if (/on the exit/i.test(a)) { say("fast flee: on the exit - done"); return "exit"; }
 if (/ladder|stairs/i.test(a)) { say("fast flee: on the ladder - waiting for the next floor"); return "wait"; }
-alertMsg("Fast flee: " + (a || "nothing to move")); return "error";
+say("fast flee: at the door - done (silent)"); return "exit";      // a63: at the green door -> no alert, no message
 }
 say("fast flee " + chunks.length + " messages: " + chunks.join(" "));
 for (let i = 0; i < chunks.length; i++) {
@@ -554,7 +552,7 @@ const st = await fastFleeCore(ch, cur);
 if (st === "exit") return "exit";
 if (st !== "sent" && st !== "wait") return st;
 let nm = await wait;
-if (!nm) { alertMsg("Fast flee: the bot did not answer with a new map"); return "error"; }
+if (!nm) { say("fast flee: no new map (door reached?) - stopped silently"); return "exit"; }      // a63: no alert
 seen[nm.id] = 1;
 for (let g = 0; g < 12; g++) {                         // the bot answers every message: wait until the last map is in
 const n2 = await waitForMap(ch, seen, FAST_SETTLE);
@@ -564,7 +562,7 @@ seen[n2.id] = 1; nm = n2;
 cur = latestMap(ch, nm);
 seen[cur.id] = 1;
 }
-alertMsg("Fast flee: stopped after " + FAST_ROUNDS + " rounds");
+say("fast flee: stopped after " + FAST_ROUNDS + " rounds");
 return "limit";
 }
 async function fastFleeNow(message) {
@@ -834,3 +832,5 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
+                 
+                 
