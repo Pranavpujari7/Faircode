@@ -498,7 +498,7 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
 // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
-const FAST_GAP = 300;            // ms between the messages of Fast flee (0 = back to back, no waiting)
+const FAST_GAP = 40;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
 function chunkSteps(steps) { const out = []; for (let i = 0; i < steps.length; i += FLEE_CHUNK) out.push(steps.slice(i, i + FLEE_CHUNK)); return out; }
