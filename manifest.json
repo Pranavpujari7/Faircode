@@ -1,14 +1,8 @@
 {
-  "name": "Decode",
-  "description": "Decode command with Flee, Fast flee, Auto loot and Auto heist.",
-  "authors": [
-    {
-      "name": "Decode"
-    }
-  ],
+  "name": "Quick Decode",
+  "description": "Decode puzzles, Flee / Fast flee / Auto loot / Auto heist via the local bot",
+  "authors": [{ "name": "Qiqi sudhan" }],
   "main": "index.js",
-  "hash": "eac08f1adb906414323076596770ca6ca53a482c217f5f2f0d1a95feb35cab44",
-  "vendetta": {
-    "icon": "ic_message_edit"
-  }
+  "hash": "6aa4891809ab7621915b0917b8120102a9ce00c916af140f0bccc8f697ac635b",
+  "vendetta": { "icon": "ic_message_edit" }
 }
