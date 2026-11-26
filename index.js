@@ -374,14 +374,26 @@ try { RestAPI.post({ url: "/channels/" + ch + "/messages", body: { content: text
 return false;
 }
 const AUTO_TYPE_FLEE = false;   // a64: true = plugin types "flee" itself when the game asks "Do you want to flee?"
-const FAST_ACK = 1500;          // a64: after each message wait (max ms) for the game's answer so the "Do you want to flee?" prompt can stop us
+const FAST_ACK = 700;           // a64: after each message wait (max ms) for the game's answer so the "Do you want to flee?" prompt can stop us
 const promptAt = {};
+const stopAt = {};              // a69: guard / sensor / lost-life message -> STOP everything until Fast flee is tapped again
 const eventAt = {};             // a67: "Spotted by Guard" / "Sensor Triggered" / lost-a-life messages -> drop the old route, plan a new one
-function isEvent(m) {
+function evText(m) { return (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawTitle || e.title || "") + " " + (e.rawDescription || e.description || ""); }).join(" "); }
+function isStopEvent(m) { try { return /spotted by guard|sensor triggered|lost a life|lives? left/i.test(evText(m)) && !isHeistMap(m); } catch (e) { return false; } }
+function isEvent(m) { try { return /needs a keycard/i.test(evText(m)) && !isHeistMap(m); } catch (e) { return false; } }
+// a69: the mobile app freezes Discord's "Police arrives in 23 seconds" text -> read the real time stamp <t:UNIX:R> and show it ourselves
+function policeLine(m) {
 try {
-const t = (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawTitle || e.title || "") + " " + (e.rawDescription || e.description || ""); }).join(" ");
-return /spotted by guard|sensor triggered|lost a life|lives? left/i.test(t) && !isHeistMap(m);
-} catch (e) { return false; }
+const t = (m.embeds || []).map(function (e) { return (e.rawDescription || e.description || ""); }).join(" ") + " " + (m.content || "");
+const x = /<t:(\d+)(?::[a-zA-Z])?>/.exec(t);
+if (!x) return null;
+const s = Math.round(+x[1] - Date.now() / 1000);
+const a = Math.abs(s), txt = a >= 60 ? Math.floor(a / 60) + "m " + (a % 60) + "s" : a + "s";
+return s >= 0 ? "Police arrive in " + txt : "Police arrived " + txt + " ago";
+} catch (e) { return null; }
+}
+function toast(msg) {
+say(msg);                          // a70: no pop-ups / toasts - console only
 }
 function isPrompt(m) {
 try {
@@ -394,8 +406,10 @@ try {
 const m = ev && ev.message;
 const pr = !!(m && m.id && m.author && m.author.bot && isPrompt(m));
 if (pr) promptAt[m.channel_id] = Date.now();
-const evn = !!(m && m.id && m.author && m.author.bot && !pr && isEvent(m));
-if (evn) eventAt[m.channel_id] = Date.now();
+const stp = !!(m && m.id && m.author && m.author.bot && !pr && isStopEvent(m));
+if (stp) stopAt[m.channel_id] = Date.now();
+const evn = stp || !!(m && m.id && m.author && m.author.bot && !pr && isEvent(m));
+if (evn && !stp) eventAt[m.channel_id] = Date.now();
 if (!mapWaiters.length || !m || !m.id || !m.author || !m.author.bot) return;
 if (!pr && !evn && (!isHeistMap(m) || !mentionsMe(m))) return;
 for (let i = mapWaiters.length - 1; i >= 0; i--) {
@@ -518,8 +532,8 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
-          // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
-const FAST_GAP = 300;            // ms between the messages of Fast flee (0 = back to back, no waiting)
+  // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
+const FAST_GAP = 120;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
 function chunkSteps(steps) { const out = []; for (let i = 0; i < steps.length; i += FLEE_CHUNK) out.push(steps.slice(i, i + FLEE_CHUNK)); return out; }
@@ -534,7 +548,7 @@ function inChannel(ch) { return SelectedChannelStore && SelectedChannelStore.get
 // FAST FLEE: ask the bot for the WHOLE route, send ALL the 5-letter messages back to back,
 // wait for the new map, plan again - and keep going until you are standing on the exit.
 const FAST_ROUNDS = 15;        // max plan -> send rounds (floors, stairs, blind spots)
-const FAST_SETTLE = 1500;      // ms of silence after the last bot map before planning again
+const FAST_SETTLE = 800;       // ms of silence after the last bot map before planning again
 // returns: "sent" (messages sent) | "exit" (you are on the exit) | "wait" (on a ladder, wait for next floor) | "cancel" | "error"
 async function fastFleeCore(ch, cur) {
 let choice = null, asks = 0;
@@ -560,11 +574,13 @@ say("fast flee: at the door - done (silent)"); return "exit";      // a63: at th
 say("fast flee " + chunks.length + " messages: " + chunks.join(" "));
 for (let i = 0; i < chunks.length; i++) {
 if (promptAt[ch] > t0) { say("fast flee: game asked 'Do you want to flee?' - stopped"); return "exit"; }   // a64
-if (eventAt[ch] > t0) { say("fast flee: guard / sensor event - old route dropped, replanning"); return "replan"; }   // a67
+if (stopAt[ch] > t0) { say("fast flee: guard / sensor event - STOPPED"); return "stop"; }   // a69
+if (eventAt[ch] > t0) { say("fast flee: keycard door - old route dropped, replanning"); return "replan"; }   // a67
 if (!sendText(ch, chunks[i])) { alertMsg("Fast flee: could not send"); return "error"; }
 if (FAST_ACK && i < chunks.length - 1) await waitForMap(ch, {}, FAST_ACK); else if (FAST_GAP) await sleep(FAST_GAP);
 }
 if (promptAt[ch] > t0) return "exit";
+if (stopAt[ch] > t0) return "stop";
 if (eventAt[ch] > t0) return "replan";
 return "sent";
 }
@@ -575,8 +591,10 @@ const seen = {}; seen[cur.id] = 1;
 for (let round = 0; round < FAST_ROUNDS; round++) {
 if (!inChannel(ch)) { say("fast flee stopped: left the channel"); return "left"; }
 const tStart = Date.now();
+seedPolice(cur);
 const wait = waitForMap(ch, seen, FLEE_WAIT);          // listen BEFORE sending so no map is missed
 const st = await fastFleeCore(ch, cur);
+if (st === "stop" || stopAt[ch] > tStart) { toast("Fast flee stopped (guard / sensor / life lost) - tap Fast flee to start again"); return "stop"; }
 if (st === "exit") { if (AUTO_TYPE_FLEE && promptAt[ch] > tStart) sendText(ch, "flee"); return "exit"; }
 if (st === "replan") {                                 // a67: let the game's last map arrive, then plan again from it
 let nm0 = null;
@@ -586,6 +604,7 @@ continue;
 }
 if (st !== "sent" && st !== "wait") return st;
 let nm = await wait;
+if (stopAt[ch] > tStart) { toast("Fast flee stopped (guard / sensor / life lost) - tap Fast flee to start again"); return "stop"; }
 if (promptAt[ch] > tStart) { if (AUTO_TYPE_FLEE) sendText(ch, "flee"); return "exit"; }      // a64: at the door
 if (!nm) { say("fast flee: no new map (door reached?) - stopped silently"); return "exit"; }      // a63: no alert
 seen[nm.id] = 1;
@@ -860,6 +879,62 @@ unpatches.push(before("openLazy", ActionSheet, function (args) {
 try { patchSheet(args); } catch (e) { say("sheet patch error: " + (e && e.message)); }
 }));
 } catch (e) { say("could not patch ActionSheet: " + (e && e.message)); }
+
+// ===== a71: POLICE TIMER - alerts at 9,8,7,6,5,4,3,2 min, 1:30, 60 s, 50 s, 30 s, 20 s, 10 s and when the police arrive =====
+const TIME_ALERT = "toast";      // "toast" = small message that disappears, "alert" = pop-up with an OK button
+const TIME_MARKS = [540, 480, 420, 360, 300, 240, 180, 120, 90, 60, 50, 30, 20, 10];
+let policeTs = 0, policeFired = {};
+function policeStamp(m) {
+try {
+const t = (m.embeds || []).map(function (e) { return (e.rawDescription || e.description || ""); }).join(" ") + " " + (m.content || "");
+const x = /<t:(\d+)(?::[a-zA-Z])?>/.exec(t);
+return x ? +x[1] : 0;
+} catch (e) { return 0; }
+}
+function seedPolice(m) {
+const ts = policeStamp(m);
+if (!ts || ts === policeTs) return;
+policeTs = ts; policeFired = {};
+const s = ts - Date.now() / 1000;
+TIME_MARKS.forEach(function (k) { if (s <= k) policeFired[k] = 1; });      // only the marks still ahead will ring
+if (s <= 0) policeFired.arrived = 1;
+say("police timer set: " + Math.round(s) + " s left");
+}
+function timeText(s) {
+if (s >= 60) { const mm = Math.floor(s / 60), ss = s % 60; return mm + (ss ? ":" + (ss < 10 ? "0" : "") + ss : "") + " min left"; }
+return s + " s left";
+}
+function timeNotify(msg) {
+if (TIME_ALERT === "alert") { try { alerts.showConfirmationAlert({ title: "Police", content: msg, confirmText: "OK" }); return; } catch (e) {} }
+try { vendetta.ui.toasts.showToast(msg); } catch (e) { say(msg); }
+}
+function onPoliceMsg(ev) {
+try {
+const m = ev && ev.message;
+if (!m || !m.author || !m.author.bot || !isHeistMap(m) || !mentionsMe(m)) return;
+seedPolice(m);
+} catch (e) {}
+}
+function policeTick() {
+if (!policeTs) return;
+const s = Math.round(policeTs - Date.now() / 1000);
+if (s > 0) {
+let hit = null;
+TIME_MARKS.forEach(function (k) { if (s <= k && !policeFired[k]) { policeFired[k] = 1; hit = k; } });
+if (hit !== null) timeNotify(timeText(s));
+} else if (!policeFired.arrived) {
+policeFired.arrived = 1;
+timeNotify("POLICE ARRIVED!");
+} else if (s < -300) { policeTs = 0; }
+}
+if (Flux && Flux.subscribe) {
+try {
+Flux.subscribe("MESSAGE_CREATE", onPoliceMsg);
+Flux.subscribe("MESSAGE_UPDATE", onPoliceMsg);
+unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onPoliceMsg); Flux.unsubscribe("MESSAGE_UPDATE", onPoliceMsg); } catch (e) {} });
+} catch (e) {}
+}
+try { const pid = setInterval(policeTick, 1000); unpatches.push(function () { clearInterval(pid); }); } catch (e) {}
 exports.onLoad = function () { say("loaded"); };
 exports.onUnload = function () {
 unpatches.forEach(function (u) { try { u(); } catch (e) {} });
@@ -868,4 +943,4 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
-  
+ 
