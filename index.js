@@ -233,7 +233,7 @@ if (name === "setText" && !seenSig) seenSig = Array.prototype.map.call(args, fun
 } catch (e) {}
 });
 }
-  // ===== PART 2 =====
+// ===== PART 2 =====
 function pushToInput(text) {
 try {
 if (!InputCmds || typeof InputCmds.setText !== "function") return "no setText helper";
@@ -249,7 +249,7 @@ if (typeof InputCmds.flushText === "function") InputCmds.flushText(inputRef);
   return "called setText(handle, text)+flushText; handle is a " + typeof inputRef + " taken from " + refVia + "." + sig;
 } catch (e) { inCall = false; return "setText failed: " + (e && e.message); }
 }
-function fillReport(msg) {
+  function fillReport(msg) {
 say("box fill: " + msg);
 if (!FILL_DEBUG) return;
 setTimeout(function () {
@@ -497,7 +497,7 @@ Flux.subscribe("MESSAGE_UPDATE", onMapEvent);
   unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onMapEvent); Flux.unsubscribe("MESSAGE_UPDATE", onMapEvent); } catch (e) {} });
 } catch (e) {}
 }
-function fire(message) {
+  function fire(message) {
 const now = Date.now();
 if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
 lastFired[message.id] = now;
@@ -535,7 +535,7 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
-    // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
+// ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
 const FAST_GAP = 120;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
@@ -598,16 +598,12 @@ if (!inChannel(ch)) { say("fast flee stopped: left the channel"); return "left";
 const tStart = Date.now();
 const settleMs = floorOf(cur) === 1 ? F1_SETTLE : FAST_SETTLE;
 seedPolice(cur);
+const startFloor = floorOf(cur);                       // a75: plan ONCE per floor - the map is read again only when the floor changes
 const wait = waitForMap(ch, seen, FLEE_WAIT);          // listen BEFORE sending so no map is missed
 const st = await fastFleeCore(ch, cur);
 if (st === "stop" || stopAt[ch] > tStart) { toast("Fast flee stopped (guard / sensor / life lost) - tap Fast flee to start again"); return "stop"; }
 if (st === "exit") { if (AUTO_TYPE_FLEE && promptAt[ch] > tStart) sendText(ch, "flee"); return "exit"; }
-if (st === "replan") {                                 // a67: let the game's last map arrive, then plan again from it
-let nm0 = null;
-for (let g = 0; g < 12; g++) { const n2 = await waitForMap(ch, seen, settleMs); if (!n2) break; seen[n2.id] = 1; nm0 = n2; if (promptAt[ch] > tStart) return "exit"; }
-cur = latestMap(ch, nm0 || cur); seen[cur.id] = 1;
-continue;
-}
+if (st === "replan") { say("fast flee: keycard door - stopped (no re-planning on the same floor)"); return "exit"; }
 if (st !== "sent" && st !== "wait") return st;
 let nm = await wait;
 if (stopAt[ch] > tStart) { toast("Fast flee stopped (guard / sensor / life lost) - tap Fast flee to start again"); return "stop"; }
@@ -620,7 +616,9 @@ if (!n2) break;
 seen[n2.id] = 1; nm = n2;
 }
 if (promptAt[ch] > tStart) { if (AUTO_TYPE_FLEE) sendText(ch, "flee"); return "exit"; }
-cur = latestMap(ch, nm);
+const nextMap = latestMap(ch, nm), nf = floorOf(nextMap);
+if (startFloor && nf && nf === startFloor) { say("fast flee: still floor " + nf + " - not planning again (only a new floor is read)"); return "done"; }   // a75
+cur = nextMap;
 seen[cur.id] = 1;
 }
 say("fast flee: stopped after " + FAST_ROUNDS + " rounds");
@@ -714,7 +712,7 @@ return comp;
 
 // DOUBLE TAP on a puzzle (Discord's quick-react gesture) = decode + send the answer, no reaction
 const lastTap = {};
-function tapPuzzle(channelId, messageId) {
+  function tapPuzzle(channelId, messageId) {
 try {
 const m = MessageStore && MessageStore.getMessage && MessageStore.getMessage(channelId, messageId);
 if (!m || !isPuzzle(m) || !(MODE === "both" || MODE === "decode")) return false;
@@ -887,7 +885,7 @@ try { patchSheet(args); } catch (e) { say("sheet patch error: " + (e && e.messag
 } catch (e) { say("could not patch ActionSheet: " + (e && e.message)); }
 
 // ===== a71: POLICE TIMER - alerts at 9,8,7,6,5,4,3,2 min, 1:30, 60 s, 50 s, 30 s, 20 s, 10 s and when the police arrive =====
-const TIME_ALERT = "toast";      // "toast" = small message that disappears, "alert" = pop-up with an OK button
+const TIME_ALERT = "bot";        // "bot" = a local bot message only YOU see (in the heist channel), "toast" = small message that disappears, "alert" = pop-up with an OK button
 const TIME_MARKS = [540, 480, 420, 360, 300, 240, 180, 120, 90, 60, 50, 30, 20, 10];
 let policeTs = 0, policeFired = {};
 function policeStamp(m) {
@@ -910,7 +908,24 @@ function timeText(s) {
 if (s >= 60) { const mm = Math.floor(s / 60), ss = s % 60; return mm + (ss ? ":" + (ss < 10 ? "0" : "") + ss : "") + " min left"; }
 return s + " s left";
 }
+const MessageCreators = (function () { try { return findByProps("createBotMessage"); } catch (e) { return null; } })();
+const BotSender = (function () { try { return findByProps("sendBotMessage"); } catch (e) { return null; } })();
+function botNotify(text) {
+try {
+const ch = SelectedChannelStore && SelectedChannelStore.getChannelId();
+if (ch && BotSender && typeof BotSender.sendBotMessage === "function") {      // a74: the same call other Kettu plugins use -> Clyde "Only you can see this"
+try { BotSender.sendBotMessage(ch, "## \ud83d\ude93 " + text); return true; } catch (e) { say("sendBotMessage failed: " + (e && e.message)); }
+}
+if (!ch || !MessageCreators || !MessageActions || typeof MessageActions.receiveMessage !== "function") return false;
+const msg = MessageCreators.createBotMessage({ channelId: ch, content: text, embeds: [] });
+try { msg.author = Object.assign({}, msg.author, { username: "Police Timer" }); } catch (e) {}
+try { msg.flags = 64; } catch (e) {}                       // "Only you can see this"
+MessageActions.receiveMessage(ch, msg);
+return true;
+} catch (e) { say("bot notify failed: " + (e && e.message)); return false; }
+}
 function timeNotify(msg) {
+if (TIME_ALERT === "bot" && botNotify(msg)) return;
 if (TIME_ALERT === "alert") { try { alerts.showConfirmationAlert({ title: "Police", content: msg, confirmText: "OK" }); return; } catch (e) {} }
 try { vendetta.ui.toasts.showToast(msg); } catch (e) { say(msg); }
 }
@@ -949,4 +964,4 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
-                                                                                                                                                                                              
+  
