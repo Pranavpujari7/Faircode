@@ -374,6 +374,9 @@ try { RestAPI.post({ url: "/channels/" + ch + "/messages", body: { content: text
 return false;
 }
 const AUTO_TYPE_FLEE = false;   // a64: true = plugin types "flee" itself when the game asks "Do you want to flee?"
+// a72: floor 1 (the door floor) = the OLD slower timing so the "Do you want to flee?" prompt is seen in time; floors 2+ = fast timing
+const F1_ACK = 1500, F1_GAP = 300, F1_SETTLE = 1500;
+function floorOf(m) { try { const t = (m.embeds || []).map(function (e) { return (e.rawTitle || e.title || ""); }).join(" ") + " " + (m.content || ""); const x = /floor\s*(\d+)/i.exec(t); return x ? +x[1] : 0; } catch (e) { return 0; } }
 const FAST_ACK = 700;           // a64: after each message wait (max ms) for the game's answer so the "Do you want to flee?" prompt can stop us
 const promptAt = {};
 const stopAt = {};              // a69: guard / sensor / lost-life message -> STOP everything until Fast flee is tapped again
@@ -532,7 +535,7 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
-  // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
+    // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
 const FAST_GAP = 120;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
@@ -553,6 +556,8 @@ const FAST_SETTLE = 800;       // ms of silence after the last bot map before pl
 async function fastFleeCore(ch, cur) {
 let choice = null, asks = 0;
 const t0 = Date.now();
+const f1 = floorOf(cur) === 1;
+const ACK_MS = f1 ? F1_ACK : FAST_ACK, GAP_MS = f1 ? F1_GAP : FAST_GAP;
 for (let k = 0; k < 6; k++) {
 let r;
 try { r = await localCall("/fastflee", Object.assign(payload(cur), { buttons: true, choice: choice }), 8000); }
@@ -577,7 +582,7 @@ if (promptAt[ch] > t0) { say("fast flee: game asked 'Do you want to flee?' - sto
 if (stopAt[ch] > t0) { say("fast flee: guard / sensor event - STOPPED"); return "stop"; }   // a69
 if (eventAt[ch] > t0) { say("fast flee: keycard door - old route dropped, replanning"); return "replan"; }   // a67
 if (!sendText(ch, chunks[i])) { alertMsg("Fast flee: could not send"); return "error"; }
-if (FAST_ACK && i < chunks.length - 1) await waitForMap(ch, {}, FAST_ACK); else if (FAST_GAP) await sleep(FAST_GAP);
+if (ACK_MS && i < chunks.length - 1) await waitForMap(ch, {}, ACK_MS); else if (GAP_MS) await sleep(GAP_MS);
 }
 if (promptAt[ch] > t0) return "exit";
 if (stopAt[ch] > t0) return "stop";
@@ -591,6 +596,7 @@ const seen = {}; seen[cur.id] = 1;
 for (let round = 0; round < FAST_ROUNDS; round++) {
 if (!inChannel(ch)) { say("fast flee stopped: left the channel"); return "left"; }
 const tStart = Date.now();
+const settleMs = floorOf(cur) === 1 ? F1_SETTLE : FAST_SETTLE;
 seedPolice(cur);
 const wait = waitForMap(ch, seen, FLEE_WAIT);          // listen BEFORE sending so no map is missed
 const st = await fastFleeCore(ch, cur);
@@ -598,7 +604,7 @@ if (st === "stop" || stopAt[ch] > tStart) { toast("Fast flee stopped (guard / se
 if (st === "exit") { if (AUTO_TYPE_FLEE && promptAt[ch] > tStart) sendText(ch, "flee"); return "exit"; }
 if (st === "replan") {                                 // a67: let the game's last map arrive, then plan again from it
 let nm0 = null;
-for (let g = 0; g < 12; g++) { const n2 = await waitForMap(ch, seen, FAST_SETTLE); if (!n2) break; seen[n2.id] = 1; nm0 = n2; if (promptAt[ch] > tStart) return "exit"; }
+for (let g = 0; g < 12; g++) { const n2 = await waitForMap(ch, seen, settleMs); if (!n2) break; seen[n2.id] = 1; nm0 = n2; if (promptAt[ch] > tStart) return "exit"; }
 cur = latestMap(ch, nm0 || cur); seen[cur.id] = 1;
 continue;
 }
@@ -609,7 +615,7 @@ if (promptAt[ch] > tStart) { if (AUTO_TYPE_FLEE) sendText(ch, "flee"); return "e
 if (!nm) { say("fast flee: no new map (door reached?) - stopped silently"); return "exit"; }      // a63: no alert
 seen[nm.id] = 1;
 for (let g = 0; g < 12; g++) {                         // the bot answers every message: wait until the last map is in
-const n2 = await waitForMap(ch, seen, FAST_SETTLE);
+const n2 = await waitForMap(ch, seen, settleMs);
 if (!n2) break;
 seen[n2.id] = 1; nm = n2;
 }
@@ -943,4 +949,4 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
- 
+                                                                                                                                                                                              
