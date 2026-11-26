@@ -3,6 +3,6 @@
   "description": "Decode puzzles, Flee / Fast flee / Auto loot / Auto heist via the local bot",
   "authors": [{ "name": "Qiqi sudhan" }],
   "main": "index.js",
-  "hash": "aab2861d076d99659116b99d5cb9ce3c682ba4f82cf7c7d8d7112de705147cc6",
+  "hash": "d741142ea30368f7ecb55a7e73dbce76896f64c6f424bfa494faeb56ad673ff4",
   "vendetta": { "icon": "ic_message_edit" }
 }
