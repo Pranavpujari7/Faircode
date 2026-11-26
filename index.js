@@ -376,6 +376,13 @@ return false;
 const AUTO_TYPE_FLEE = false;   // a64: true = plugin types "flee" itself when the game asks "Do you want to flee?"
 const FAST_ACK = 1500;          // a64: after each message wait (max ms) for the game's answer so the "Do you want to flee?" prompt can stop us
 const promptAt = {};
+const eventAt = {};             // a67: "Spotted by Guard" / "Sensor Triggered" / lost-a-life messages -> drop the old route, plan a new one
+function isEvent(m) {
+try {
+const t = (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawTitle || e.title || "") + " " + (e.rawDescription || e.description || ""); }).join(" ");
+return /spotted by guard|sensor triggered|lost a life|lives? left/i.test(t) && !isHeistMap(m);
+} catch (e) { return false; }
+}
 function isPrompt(m) {
 try {
 const t = (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawDescription || e.description || "") + " " + (e.rawTitle || e.title || ""); }).join(" ");
@@ -387,8 +394,10 @@ try {
 const m = ev && ev.message;
 const pr = !!(m && m.id && m.author && m.author.bot && isPrompt(m));
 if (pr) promptAt[m.channel_id] = Date.now();
+const evn = !!(m && m.id && m.author && m.author.bot && !pr && isEvent(m));
+if (evn) eventAt[m.channel_id] = Date.now();
 if (!mapWaiters.length || !m || !m.id || !m.author || !m.author.bot) return;
-if (!pr && (!isHeistMap(m) || !mentionsMe(m))) return;
+if (!pr && !evn && (!isHeistMap(m) || !mentionsMe(m))) return;
 for (let i = mapWaiters.length - 1; i >= 0; i--) {
   
   const w = mapWaiters[i];
@@ -509,7 +518,7 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
-    // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
+          // ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
 const FAST_GAP = 300;            // ms between the messages of Fast flee (0 = back to back, no waiting)
 const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
@@ -551,10 +560,12 @@ say("fast flee: at the door - done (silent)"); return "exit";      // a63: at th
 say("fast flee " + chunks.length + " messages: " + chunks.join(" "));
 for (let i = 0; i < chunks.length; i++) {
 if (promptAt[ch] > t0) { say("fast flee: game asked 'Do you want to flee?' - stopped"); return "exit"; }   // a64
+if (eventAt[ch] > t0) { say("fast flee: guard / sensor event - old route dropped, replanning"); return "replan"; }   // a67
 if (!sendText(ch, chunks[i])) { alertMsg("Fast flee: could not send"); return "error"; }
 if (FAST_ACK && i < chunks.length - 1) await waitForMap(ch, {}, FAST_ACK); else if (FAST_GAP) await sleep(FAST_GAP);
 }
 if (promptAt[ch] > t0) return "exit";
+if (eventAt[ch] > t0) return "replan";
 return "sent";
 }
 return "error";
@@ -567,6 +578,12 @@ const tStart = Date.now();
 const wait = waitForMap(ch, seen, FLEE_WAIT);          // listen BEFORE sending so no map is missed
 const st = await fastFleeCore(ch, cur);
 if (st === "exit") { if (AUTO_TYPE_FLEE && promptAt[ch] > tStart) sendText(ch, "flee"); return "exit"; }
+if (st === "replan") {                                 // a67: let the game's last map arrive, then plan again from it
+let nm0 = null;
+for (let g = 0; g < 12; g++) { const n2 = await waitForMap(ch, seen, FAST_SETTLE); if (!n2) break; seen[n2.id] = 1; nm0 = n2; if (promptAt[ch] > tStart) return "exit"; }
+cur = latestMap(ch, nm0 || cur); seen[cur.id] = 1;
+continue;
+}
 if (st !== "sent" && st !== "wait") return st;
 let nm = await wait;
 if (promptAt[ch] > tStart) { if (AUTO_TYPE_FLEE) sendText(ch, "flee"); return "exit"; }      // a64: at the door
