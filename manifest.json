@@ -1,8 +1,8 @@
 {
-  "name": "Quick Decodev1",
+  "name": "Quick Decode",
   "description": "Decode puzzles, Flee / Fast flee / Auto loot / Auto heist via the local bot",
   "authors": [{ "name": "Qiqi sudhan" }],
   "main": "index.js",
-  "hash": "e3b84a23f6f6a5802fbaef75f98a658925a0b115b82ed1e09232183ab9d337bd",
+  "hash": "aab2861d076d99659116b99d5cb9ce3c682ba4f82cf7c7d8d7112de705147cc6",
   "vendetta": { "icon": "ic_message_edit" }
 }
