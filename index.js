@@ -255,8 +255,8 @@ if (!FILL_DEBUG) return;
 setTimeout(function () {
 try { alerts.showConfirmationAlert({ title: "Quick Decode box fill", content: msg, confirmText: "OK" }); } catch (e) {}
 }, 300);
-}
-function fillBox(message, answer) {
+  }
+  function fillBox(message, answer) {
 if (!FILL_BOX) return;
 try {
 const text = String(answer || "").replace(/\s+/g, " ").trim();
@@ -505,7 +505,7 @@ say("decoding...");
 decodeNow(message);
 }
 const preSeen = {};
-function onNewMessage(ev) {
+                           function onNewMessage(ev) {
 try {
 const m = ev && ev.message;
 if (!m || !m.id || preSeen[m.id] || !m.author || !m.author.bot) return;
@@ -535,9 +535,8 @@ function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e
 }, 2000);
 if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
-// ===================== a60: MENU (Flee / Fast flee / Auto loot / Auto heist) + helpers =====================
+// ===================== a76: MENU (Flee / Fast flee / Floor 1 / Floor 2 / Floor 3) + helpers =====================
 const FAST_GAP = 120;            // ms between the messages of Fast flee (0 = back to back, no waiting)
-const AUTO_ROUNDS = 60;        // max rounds of Auto loot / Auto heist
 function cleanSteps(x) { return String(x || "").toLowerCase().replace(/[^wasd]/g, ""); }
 function chunkSteps(steps) { const out = []; for (let i = 0; i < steps.length; i += FLEE_CHUNK) out.push(steps.slice(i, i + FLEE_CHUNK)); return out; }
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -576,6 +575,7 @@ const a = String(r.answer || "");
 if (/ladder|stairs/i.test(a)) { say("fast flee: on the ladder - waiting for the next floor"); return "wait"; }
 say("fast flee: at the door - done (silent)"); return "exit";      // a63: at the green door -> no alert, no message
 }
+lastStairs = /STAIRS/.test(String(r.answer || ""));
 say("fast flee " + chunks.length + " messages: " + chunks.join(" "));
 for (let i = 0; i < chunks.length; i++) {
 if (promptAt[ch] > t0) { say("fast flee: game asked 'Do you want to flee?' - stopped"); return "exit"; }   // a64
@@ -591,21 +591,49 @@ return "sent";
 }
 return "error";
 }
-async function fastFleeLoop(ch, cur) {
+let lastStairs = false;          // a76: the last route the bot gave was a STAIRS route -> after sending it, wait for the NEXT floor map
+// a76: wait until the newest heist map shows a different floor than `fromFloor` (polls the message store, so an EDITED map message is seen too)
+async function waitFloorChange(ch, fromFloor, t0, maxMs) {
+const end = Date.now() + maxMs;
+while (Date.now() < end) {
+if (!inChannel(ch)) return null;
+if (stopAt[ch] > t0) return null;
+const m = latestMap(ch, null);
+if (m) { const f = floorOf(m); if (f && f !== fromFloor) return m; }
+await sleep(350);
+}
+return null;
+}
+async function fastFleeLoop(ch, cur, stopFloor) {
 const seen = {}; seen[cur.id] = 1;
 for (let round = 0; round < FAST_ROUNDS; round++) {
 if (!inChannel(ch)) { say("fast flee stopped: left the channel"); return "left"; }
 const tStart = Date.now();
-const settleMs = floorOf(cur) === 1 ? F1_SETTLE : FAST_SETTLE;
-seedPolice(cur);
 const startFloor = floorOf(cur);                       // a75: plan ONCE per floor - the map is read again only when the floor changes
+if (stopFloor && startFloor === stopFloor) { say("fast flee: reached floor " + stopFloor + " - stopped"); return "target"; }   // a76
+const settleMs = startFloor === 1 ? F1_SETTLE : FAST_SETTLE;
+seedPolice(cur);
+lastStairs = false;
 const wait = waitForMap(ch, seen, FLEE_WAIT);          // listen BEFORE sending so no map is missed
 const st = await fastFleeCore(ch, cur);
 if (st === "stop" || stopAt[ch] > tStart) { toast("Fast flee stopped (guard / sensor / life lost) - tap Fast flee to start again"); return "stop"; }
 if (st === "exit") { if (AUTO_TYPE_FLEE && promptAt[ch] > tStart) sendText(ch, "flee"); return "exit"; }
 if (st === "replan") { say("fast flee: keycard door - stopped (no re-planning on the same floor)"); return "exit"; }
 if (st !== "sent" && st !== "wait") return st;
-let nm = await wait;
+const viaStairs = lastStairs || st === "wait";
+let nm = null;
+if (viaStairs) {                                       // a76: stairs trip - the new floor map can come late or as an edit of the old message: poll for the floor number
+say("fast flee: on the stairs - waiting for the new floor");
+const nf2 = await waitFloorChange(ch, startFloor, tStart, 25000);
+if (stopAt[ch] > tStart) { toast("Fast flee stopped (guard / sensor / life lost) - tap Fast flee to start again"); return "stop"; }
+if (promptAt[ch] > tStart) { if (AUTO_TYPE_FLEE) sendText(ch, "flee"); return "exit"; }
+if (!nf2) { say("fast flee: floor did not change - stopped"); return "done"; }
+await sleep(600);                                      // let the bot's other replies land, then take the newest map
+cur = latestMap(ch, nf2);
+seen[cur.id] = 1;
+continue;
+}
+nm = await wait;
 if (stopAt[ch] > tStart) { toast("Fast flee stopped (guard / sensor / life lost) - tap Fast flee to start again"); return "stop"; }
 if (promptAt[ch] > tStart) { if (AUTO_TYPE_FLEE) sendText(ch, "flee"); return "exit"; }      // a64: at the door
 if (!nm) { say("fast flee: no new map (door reached?) - stopped silently"); return "exit"; }      // a63: no alert
@@ -624,54 +652,18 @@ seen[cur.id] = 1;
 say("fast flee: stopped after " + FAST_ROUNDS + " rounds");
 return "limit";
 }
-async function fastFleeNow(message) {
+async function fastFleeNow(message, stopFloor) {
 const ch = message.channel_id;
 if (!inChannel(ch)) { alertMsg("Fast flee: open the heist channel first"); return; }
 if (!claim(ch)) return;
-try { await fastFleeLoop(ch, latestMap(ch, message)); } finally { release(ch); }
-}
-
-// AUTO LOOT / AUTO HEIST: bot says the next moves, plugin sends them, waits for the new map, repeats
-async function autoLoop(ch, cur, path, label, extra) {
-const seen = {}; seen[cur.id] = 1;
-for (let round = 0; round < AUTO_ROUNDS; round++) {
-if (!inChannel(ch)) { say(label + " stopped: left the channel"); return "left"; }
-let r;
-try { r = await localCall(path, Object.assign(payload(cur), { n: FLEE_CHUNK, reset: round === 0 }, extra || {}), 8000); }
-catch (e) { linkDown(e); alertMsg(label + ": bot not reachable (" + (e && e.message) + ")"); return "error"; }
-if (r && r.done) { say(label + " done: " + (r.answer || "")); return "done"; }
-const steps = cleanSteps(r && r.steps);
-if (!r || !r.ok || !steps) { alertMsg(label + ": " + ((r && r.answer) || "no answer")); return "error"; }
-const wait = waitForMap(ch, seen, FLEE_WAIT);
-if (!sendText(ch, steps.slice(0, FLEE_CHUNK))) { alertMsg(label + ": could not send"); return "error"; }
-const nm = await wait;
-if (!nm) { alertMsg(label + ": the bot did not answer with a new map"); return "error"; }
-seen[nm.id] = 1; cur = nm;
-}
-alertMsg(label + ": stopped after " + AUTO_ROUNDS + " rounds");
-return "limit";
-}
-async function autoLootNow(message) {
-const ch = message.channel_id;
-if (!inChannel(ch)) { alertMsg("Auto loot: open the heist channel first"); return; }
-if (!claim(ch)) return;
-try { await autoLoop(ch, latestMap(ch, message), "/loot", "Auto loot"); } finally { release(ch); }
-}
-// Auto heist = scout the whole floor (Scout), then Fast flee out
-async function autoHeistNow(message) {
-const ch = message.channel_id;
-if (!inChannel(ch)) { alertMsg("Auto heist: open the heist channel first"); return; }
-if (!claim(ch)) return;
-try {
-const res = await autoLoop(ch, latestMap(ch, message), "/scout", "Auto heist");
-if (res === "done") await fastFleeLoop(ch, latestMap(ch, message));
-} finally { release(ch); }
+try { await fastFleeLoop(ch, latestMap(ch, message), stopFloor || 0); } finally { release(ch); }
 }
 const MENU = [
 { label: "Flee", run: function (m) { fleeNow(m); } },
-{ label: "Fast flee", run: function (m) { fastFleeNow(m); } },
-{ label: "Auto loot", run: function (m) { autoLootNow(m); } },
-{ label: "Auto heist", run: function (m) { autoHeistNow(m); } },
+{ label: "Fast flee", run: function (m) { fastFleeNow(m, 0); } },
+{ label: "Floor 1", run: function (m) { fastFleeNow(m, 1); } },
+{ label: "Floor 2", run: function (m) { fastFleeNow(m, 2); } },
+{ label: "Floor 3", run: function (m) { fastFleeNow(m, 3); } },
 ];
 function hideSheet() { try { ActionSheet.hideActionSheet(); } catch (e) {} }
 // fallback menu (only used if the rows can't be added to Discord's own sheet)
@@ -740,7 +732,7 @@ return orig.apply(this, args);
 } catch (e) { say("could not patch " + name + ": " + (e && e.message)); }
 });
 });
-// ---- from the old plugin: P = let Discord allow the double-tap reaction in puzzle channels (otherwise the tap is blocked before any hook runs)
+  // ---- from the old plugin: P = let Discord allow the double-tap reaction in puzzle channels (otherwise the tap is blocked before any hook runs)
 const puzzleChan = {};
 function channelHasPuzzle(channelId) {
 const now = Date.now(), c = puzzleChan[channelId];
@@ -964,4 +956,4 @@ unpatches.length = 0;
 Object.defineProperty(exports, "__esModule", { value: true });
 return exports;
 })({});
-  
+
